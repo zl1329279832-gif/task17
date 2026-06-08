@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.property.repair.mapper.RepairOrderMapper">
+
+    <!-- 工单详情结果映射 -->
+    <resultMap id="OrderDetailResultMap" type="com.property.repair.dto.response.RepairOrderDetailResponse">
+        <id property="id" column="id"/>
+        <result property="orderNo" column="order_no"/>
+        <result property="title" column="title"/>
+        <result property="description" column="description"/>
+        <result property="urgency" column="urgency"/>
+        <result property="status" column="status"/>
+        <result property="statusDesc" column="status_desc"/>
+        <result property="ownerId" column="owner_id"/>
+        <result property="ownerName" column="owner_name"/>
+        <result property="ownerPhone" column="owner_phone"/>
+        <result property="communityId" column="community_id"/>
+        <result property="communityName" column="community_name"/>
+        <result property="buildingId" column="building_id"/>
+        <result property="buildingName" column="building_name"/>
+        <result property="unitNumber" column="unit_number"/>
+        <result property="categoryId" column="category_id"/>
+        <result property="categoryName" column="category_name"/>
+        <result property="currentWorkerId" column="current_worker_id"/>
+        <result property="currentWorkerName" column="worker_name"/>
+        <result property="currentWorkerPhone" column="worker_phone"/>
+        <result property="expectedTime" column="expected_time"/>
+        <result property="assignedAt" column="assigned_at"/>
+        <result property="acceptedAt" column="accepted_at"/>
+        <result property="startedAt" column="started_at"/>
+        <result property="completedAt" column="completed_at"/>
+        <result property="confirmedAt" column="confirmed_at"/>
+        <result property="reworkCount" column="rework_count"/>
+        <result property="duplicateGroup" column="duplicate_group"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <!-- 工单列表结果映射 -->
+    <resultMap id="OrderListResultMap" type="com.property.repair.dto.response.RepairOrderListResponse">
+        <id property="id" column="id"/>
+        <result property="orderNo" column="order_no"/>
+        <result property="title" column="title"/>
+        <result property="urgency" column="urgency"/>
+        <result property="status" column="status"/>
+        <result property="statusDesc" column="status_desc"/>
+        <result property="communityName" column="community_name"/>
+        <result property="buildingName" column="building_name"/>
+        <result property="unitNumber" column="unit_number"/>
+        <result property="categoryName" column="category_name"/>
+        <result property="currentWorkerName" column="worker_name"/>
+        <result property="reworkCount" column="rework_count"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <!-- 查询工单详情 -->
+    <select id="selectDetailById" resultMap="OrderDetailResultMap" parameterType="java.lang.Long">
+        SELECT
+            ro.id,
+            ro.order_no,
+            ro.title,
+            ro.description,
+            ro.urgency,
+            ro.status,
+            CASE ro.status
+                WHEN 'PENDING' THEN '待处理'
+                WHEN 'ASSIGNED' THEN '已派单'
+                WHEN 'ACCEPTED' THEN '已接单'
+                WHEN 'IN_PROGRESS' THEN '处理中'
+                WHEN 'SUSPENDED' THEN '已挂起'
+                WHEN 'COMPLETED' THEN '已完成'
+                WHEN 'CONFIRMED' THEN '已确认'
+                WHEN 'EVALUATED' THEN '已评价'
+                WHEN 'ESCALATED' THEN '已升级'
+                WHEN 'REWORK' THEN '返工中'
+                WHEN 'REJECTED' THEN '已拒绝'
+                ELSE ro.status
+            END AS status_desc,
+            ro.owner_id,
+            owner.real_name AS owner_name,
+            owner.phone AS owner_phone,
+            ro.community_id,
+            c.name AS community_name,
+            ro.building_id,
+            b.name AS building_name,
+            ro.unit_number,
+            ro.category_id,
+            cat.name AS category_name,
+            ro.current_worker_id,
+            worker.real_name AS worker_name,
+            worker.phone AS worker_phone,
+            ro.expected_time,
+            ro.assigned_at,
+            ro.accepted_at,
+            ro.started_at,
+            ro.completed_at,
+            ro.confirmed_at,
+            ro.rework_count,
+            ro.duplicate_group,
+            ro.created_at
+        FROM repair_order ro
+        LEFT JOIN sys_user owner ON ro.owner_id = owner.id
+        LEFT JOIN sys_user worker ON ro.current_worker_id = worker.id
+        LEFT JOIN community c ON ro.community_id = c.id
+        LEFT JOIN building b ON ro.building_id = b.id
+        LEFT JOIN category cat ON ro.category_id = cat.id
+        WHERE ro.id = #{id}
+    </select>
+
+    <!-- 分页查询工单列表 -->
+    <select id="selectListPage" resultMap="OrderListResultMap">
+        SELECT
+            ro.id,
+            ro.order_no,
+            ro.title,
+            ro.urgency,
+            ro.status,
+            CASE ro.status
+                WHEN 'PENDING' THEN '待处理'
+                WHEN 'ASSIGNED' THEN '已派单'
+                WHEN 'ACCEPTED' THEN '已接单'
+                WHEN 'IN_PROGRESS' THEN '处理中'
+                WHEN 'SUSPENDED' THEN '已挂起'
+                WHEN 'COMPLETED' THEN '已完成'
+                WHEN 'CONFIRMED' THEN '已确认'
+                WHEN 'EVALUATED' THEN '已评价'
+                WHEN 'ESCALATED' THEN '已升级'
+                WHEN 'REWORK' THEN '返工中'
+                WHEN 'REJECTED' THEN '已拒绝'
+                ELSE ro.status
+            END AS status_desc,
+            c.name AS community_name,
+            b.name AS building_name,
+            ro.unit_number,
+            cat.name AS category_name,
+            worker.real_name AS worker_name,
+            ro.rework_count,
+            ro.created_at
+        FROM repair_order ro
+        LEFT JOIN community c ON ro.community_id = c.id
+        LEFT JOIN building b ON ro.building_id = b.id
+        LEFT JOIN category cat ON ro.category_id = cat.id
+        LEFT JOIN sys_user worker ON ro.current_worker_id = worker.id
+        <where>
+            <if test="status != null and status != ''">
+                AND ro.status = #{status}
+            </if>
+            <if test="communityId != null">
+                AND ro.community_id = #{communityId}
+            </if>
+            <if test="categoryId != null">
+                AND ro.category_id = #{categoryId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (ro.title LIKE CONCAT('%', #{keyword}, '%')
+                     OR ro.description LIKE CONCAT('%', #{keyword}, '%')
+                     OR ro.order_no LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            <if test="ownerId != null">
+                AND ro.owner_id = #{ownerId}
+            </if>
+            <if test="workerId != null">
+                AND ro.current_worker_id = #{workerId}
+            </if>
+            <if test="startDate != null and startDate != ''">
+                AND ro.created_at &gt;= #{startDate}
+            </if>
+            <if test="endDate != null and endDate != ''">
+                AND ro.created_at &lt;= #{endDate}
+            </if>
+        </where>
+        ORDER BY ro.created_at DESC
+    </select>
+
+    <!-- 统计维修人员指定状态的工单数 -->
+    <select id="countByWorkerAndStatuses" resultType="java.lang.Integer">
+        SELECT COUNT(*)
+        FROM repair_order
+        WHERE current_worker_id = #{workerId}
+        AND status IN
+        <foreach collection="statuses" item="status" open="(" separator="," close=")">
+            #{status}
+        </foreach>
+    </select>
+
+</mapper>

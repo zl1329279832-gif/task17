@@ -1,0 +1,8 @@
+com\property\repair\service\AutoDispatchStrategyTest.class
+com\property\repair\service\DuplicateDetectionServiceTest.class
+com\property\repair\controller\RepairOrderControllerTest.class
+com\property\repair\integration\RepairOrderIntegrationTest.class
+com\property\repair\controller\AuthControllerTest.class
+com\property\repair\service\OrderStateMachineTest.class
+com\property\repair\service\JwtTokenProviderTest.class
+com\property\repair\service\RepairOrderServiceTest.class
