@@ -55,6 +55,8 @@ class RepairOrderServiceTest {
     @Mock private RedisTemplate<String, Object> redisTemplate;
     @Mock private ValueOperations<String, Object> valueOperations;
     @Mock private TimeoutEscalationMapper timeoutEscalationMapper;
+    @Mock private PartRequestMapper partRequestMapper;
+    @Mock private PartRequestItemMapper partRequestItemMapper;
 
     private RepairOrderServiceImpl orderService;
     private OrderStateMachine stateMachine;
@@ -71,7 +73,8 @@ class RepairOrderServiceTest {
                 orderMapper, dispatchRecordMapper, progressMapper,
                 reviewMapper, reworkOrderMapper, userMapper,
                 attachmentMapper, auditService, dispatchStrategy,
-                stateMachine, redisTemplate, timeoutEscalationMapper);
+                stateMachine, redisTemplate, timeoutEscalationMapper,
+                partRequestMapper, partRequestItemMapper);
 
         // ServiceImpl.getById() uses baseMapper field which is normally set by Spring/MyBatis
         ReflectionTestUtils.setField(orderService, "baseMapper", orderMapper);

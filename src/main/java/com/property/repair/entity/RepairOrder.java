@@ -57,8 +57,14 @@ public class RepairOrder {
     /** When the order was suspended (null when not suspended) */
     private LocalDateTime suspendedAt;
 
+    /** When the order entered WAITING_PARTS status */
+    private LocalDateTime waitingPartsAt;
+
     /** Cumulative seconds the order has been suspended */
     private Integer totalSuspendedSeconds;
+
+    /** Cumulative seconds the order has been waiting for parts */
+    private Integer totalWaitingPartsSeconds;
 
     // ---- Timestamps ----
     private LocalDateTime submittedAt;

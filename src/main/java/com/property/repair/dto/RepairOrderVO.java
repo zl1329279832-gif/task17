@@ -45,6 +45,13 @@ public class RepairOrderVO {
     private Integer totalSuspendedSeconds;
     private Long currentDispatchId;
 
+    // Spare parts waiting
+    private LocalDateTime waitingPartsAt;
+    private Integer totalWaitingPartsSeconds;
+
+    // Spare part requests
+    private List<PartRequestSummary> partRequests;
+
     // Timestamps
     private LocalDateTime submittedAt;
     private LocalDateTime assignedAt;
@@ -107,6 +114,17 @@ public class RepairOrderVO {
         private Long assignedWorkerId;
         private String assignedWorkerName;
         private LocalDateTime completedAt;
+        private LocalDateTime createdAt;
+    }
+
+    @Data
+    public static class PartRequestSummary {
+        private Long id;
+        private String requestNo;
+        private String requestType;
+        private String status;
+        private int itemCount;
+        private int criticalItemCount;
         private LocalDateTime createdAt;
     }
 }

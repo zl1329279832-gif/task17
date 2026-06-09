@@ -17,7 +17,7 @@ public interface RepairOrderMapper extends BaseMapper<RepairOrder> {
      */
     @Select("SELECT COUNT(*) FROM repair_order " +
             "WHERE assigned_worker_id = #{workerId} " +
-            "AND status IN ('DISPATCHED','ACCEPTED','VISITING','REWORKING') " +
+            "AND status IN ('DISPATCHED','ACCEPTED','VISITING','REWORKING','WAITING_PARTS') " +
             "AND deleted = 0")
     int countActiveOrders(@Param("workerId") Long workerId);
 

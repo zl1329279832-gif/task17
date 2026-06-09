@@ -59,6 +59,19 @@ class OrderStateMachineTest {
             Arguments.of(OrderStatus.REWORKING, OrderStatus.COMPLETED),
             Arguments.of(OrderStatus.REWORKING, OrderStatus.SUSPENDED),
 
+            // Waiting for parts (SLA pause)
+            Arguments.of(OrderStatus.ACCEPTED, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.VISITING, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.REWORKING, OrderStatus.WAITING_PARTS),
+
+            // Parts arrived → resume
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.ACCEPTED),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.VISITING),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.REWORKING),
+
+            // Admin close from WAITING_PARTS
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.CLOSED),
+
             // Cancel
             Arguments.of(OrderStatus.PENDING, OrderStatus.CANCELLED),
 

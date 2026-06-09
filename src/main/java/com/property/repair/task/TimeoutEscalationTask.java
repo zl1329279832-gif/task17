@@ -159,6 +159,11 @@ public class TimeoutEscalationTask {
                 continue;
             }
 
+            // Skip orders waiting for parts (SLA paused)
+            if (order.getStatus().equals(OrderStatus.WAITING_PARTS.getCode())) {
+                continue;
+            }
+
             // Skip if escalation belongs to a superseded dispatch round
             if (esc.getDispatchId() != null
                     && !esc.getDispatchId().equals(order.getCurrentDispatchId())) {

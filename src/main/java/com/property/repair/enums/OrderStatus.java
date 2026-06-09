@@ -10,8 +10,10 @@ import lombok.Getter;
  *   PENDING → DISPATCHED → ACCEPTED → VISITING → COMPLETED → REVIEWED
  *               ↓            ↓           ↓          ↓
  *           TRANSFERRED   SUSPENDED   SUSPENDED   REWORKING → COMPLETED
- *               ↓            ↓           ↓
- *           DISPATCHED    ACCEPTED    VISITING
+ *               ↓            ↓           ↓           ↓
+ *           DISPATCHED    ACCEPTED    VISITING   WAITING_PARTS → (resume)
+ *                                         ↑            ↓
+ *                                    WAITING_PARTS  ACCEPTED/VISITING/REWORKING
  */
 @Getter
 @AllArgsConstructor
@@ -26,6 +28,7 @@ public enum OrderStatus {
     TRANSFERRED("TRANSFERRED", "Transferred to another worker"),
     SUSPENDED("SUSPENDED", "Temporarily suspended"),
     REWORKING("REWORKING", "Rework in progress"),
+    WAITING_PARTS("WAITING_PARTS", "Waiting for spare parts arrival"),
     CLOSED("CLOSED", "Closed by admin"),
     CANCELLED("CANCELLED", "Cancelled by owner");
 
@@ -44,5 +47,12 @@ public enum OrderStatus {
      */
     public boolean isActive() {
         return this == DISPATCHED || this == ACCEPTED || this == VISITING || this == REWORKING;
+    }
+
+    /**
+     * Whether the order is paused waiting for parts (SLA clock stopped).
+     */
+    public boolean isWaitingParts() {
+        return this == WAITING_PARTS;
     }
 }

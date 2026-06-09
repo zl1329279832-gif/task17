@@ -49,6 +49,8 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     private final OrderStateMachine stateMachine;
     private final RedisTemplate<String, Object> redisTemplate;
     private final TimeoutEscalationMapper timeoutEscalationMapper;
+    private final PartRequestMapper partRequestMapper;
+    private final PartRequestItemMapper partRequestItemMapper;
 
     @Value("${repair.duplicate.window-hours:24}")
     private int duplicateWindowHours;
@@ -764,6 +766,8 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         vo.setSuspendedAt(order.getSuspendedAt());
         vo.setTotalSuspendedSeconds(order.getTotalSuspendedSeconds());
         vo.setCurrentDispatchId(order.getCurrentDispatchId());
+        vo.setWaitingPartsAt(order.getWaitingPartsAt());
+        vo.setTotalWaitingPartsSeconds(order.getTotalWaitingPartsSeconds());
         vo.setSubmittedAt(order.getSubmittedAt());
         vo.setAssignedAt(order.getAssignedAt());
         vo.setAcceptedAt(order.getAcceptedAt());
@@ -855,6 +859,34 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
                 if (w != null) rov.setAssignedWorkerName(w.getRealName());
             }
             return rov;
+        }).collect(Collectors.toList()));
+
+        // Part requests
+        List<PartRequest> partRequests = partRequestMapper.selectList(
+                new LambdaQueryWrapper<PartRequest>()
+                        .eq(PartRequest::getOrderId, order.getId())
+                        .orderByDesc(PartRequest::getCreatedAt));
+        vo.setPartRequests(partRequests.stream().map(pr -> {
+            RepairOrderVO.PartRequestSummary summary = new RepairOrderVO.PartRequestSummary();
+            summary.setId(pr.getId());
+            summary.setRequestNo(pr.getRequestNo());
+            summary.setRequestType(pr.getRequestType());
+            summary.setStatus(pr.getStatus());
+            summary.setCreatedAt(pr.getCreatedAt());
+
+            // Count items
+            long itemCount = partRequestItemMapper.selectCount(
+                    new LambdaQueryWrapper<PartRequestItem>()
+                            .eq(PartRequestItem::getRequestId, pr.getId()));
+            summary.setItemCount((int) itemCount);
+
+            long criticalCount = partRequestItemMapper.selectCount(
+                    new LambdaQueryWrapper<PartRequestItem>()
+                            .eq(PartRequestItem::getRequestId, pr.getId())
+                            .eq(PartRequestItem::getCritical, 1));
+            summary.setCriticalItemCount((int) criticalCount);
+
+            return summary;
         }).collect(Collectors.toList()));
 
         return vo;
