@@ -23,6 +23,9 @@ public class PurchaseRequest {
 
     private Long communityId;
 
+    /** Building-level warehouse target (null = community-level) */
+    private Long buildingId;
+
     private Integer quantity;
 
     /** 1=Low, 2=Normal, 3=High, 4=Urgent */

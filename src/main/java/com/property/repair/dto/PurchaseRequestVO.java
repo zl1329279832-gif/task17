@@ -17,6 +17,7 @@ public class PurchaseRequestVO {
     private String partName;
     private Long communityId;
     private String communityName;
+    private Long buildingId;
     private Integer quantity;
     private Integer urgency;
     private String status;

@@ -277,3 +277,10 @@ CREATE INDEX `idx_order_status_worker` ON `repair_order` (`status`, `assigned_wo
 CREATE INDEX `idx_progress_order_time` ON `repair_progress` (`order_id`, `created_at`);
 CREATE INDEX `idx_dispatch_active` ON `dispatch_record` (`order_id`, `active`);
 CREATE INDEX `idx_escalation_dispatch` ON `timeout_escalation` (`order_id`, `dispatch_id`, `handled`);
+
+-- ---------------------------------------------------
+-- Spare Parts Schema Migration
+-- ---------------------------------------------------
+ALTER TABLE `purchase_request` ADD COLUMN `building_id` BIGINT DEFAULT NULL
+    COMMENT 'Building warehouse target (null = community-level)' AFTER `community_id`;
+CREATE INDEX `idx_purchase_community_building` ON `purchase_request` (`community_id`, `building_id`);

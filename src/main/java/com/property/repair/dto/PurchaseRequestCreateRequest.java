@@ -15,6 +15,8 @@ public class PurchaseRequestCreateRequest {
 
     private Long communityId;
 
+    private Long buildingId;
+
     @NotNull
     @Min(1)
     private Integer quantity;

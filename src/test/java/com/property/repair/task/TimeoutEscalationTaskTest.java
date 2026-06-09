@@ -215,4 +215,45 @@ class TimeoutEscalationTaskTest {
 
         verify(escalationMapper, never()).insert(any());
     }
+
+    @Test
+    @DisplayName("After WAITING_PARTS resume, timeout fires if adjusted deadline exceeded")
+    void afterWaitingPartsResume_timeoutFiresWithAdjustedDeadline() {
+        // Order was resumed from WAITING_PARTS: visitAt was adjusted forward
+        // but the new deadline (visitAt + 48h) has now been exceeded
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setOrderNo("RO001");
+        order.setStatus(OrderStatus.VISITING.getCode());
+        order.setVisitAt(LocalDateTime.now().minusHours(50)); // 48h SLA + 15min delay exceeded
+        order.setAssignedWorkerId(4L);
+        order.setCommunityId(1L);
+        order.setCurrentDispatchId(20L);
+
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(order));
+
+        // Redis processed key was cleared on WAITING_PARTS entry and NOT re-set
+        when(redisTemplate.hasKey(anyString())).thenReturn(false);
+
+        // DB escalation records were cleared by clearEscalationRecordsForCurrentRound
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(escalationMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
+
+        User supervisor = new User();
+        supervisor.setId(2L);
+        supervisor.setRole("SUPERVISOR");
+        when(userMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(supervisor);
+        when(escalationMapper.insert(any())).thenReturn(1);
+
+        task.checkCompleteTimeouts();
+
+        // Verify: new escalation created with the current dispatch round
+        ArgumentCaptor<TimeoutEscalation> captor =
+                ArgumentCaptor.forClass(TimeoutEscalation.class);
+        verify(escalationMapper).insert(captor.capture());
+        assertEquals(TimeoutType.COMPLETE_TIMEOUT.getCode(), captor.getValue().getTimeoutType());
+        assertEquals(20L, captor.getValue().getDispatchId());
+        assertEquals(1L, captor.getValue().getOrderId());
+    }
 }

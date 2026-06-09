@@ -39,8 +39,15 @@ public class SparePartServiceImpl implements SparePartService {
     private final AuditService auditService;
     private final OrderStateMachine stateMachine;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final TimeoutEscalationMapper escalationMapper;
 
     private static final AtomicLong SEQ = new AtomicLong(0);
+
+    private static final String INVENTORY_LOCK_PREFIX = "parts:inv:lock:";
+    private static final String REQUEST_LOCK_PREFIX = "parts:req:lock:";
+    private static final Duration LOCK_TTL = Duration.ofSeconds(10);
+    private static final int LOCK_RETRY_MAX = 3;
+    private static final long LOCK_RETRY_DELAY_MS = 200;
 
     // ==========================================================================
     // Part Recommendation
@@ -121,62 +128,75 @@ public class SparePartServiceImpl implements SparePartService {
             throw new BusinessException("Cannot request parts in status: " + status);
         }
 
-        // Check for duplicate active request (prevent duplicate requests for same order)
-        long activeRequestCount = partRequestMapper.selectCount(
-                new LambdaQueryWrapper<PartRequest>()
-                        .eq(PartRequest::getOrderId, orderId)
-                        .eq(PartRequest::getWorkerId, workerId)
-                        .in(PartRequest::getStatus,
-                                PartRequestStatus.PENDING.getCode(),
-                                PartRequestStatus.APPROVED.getCode(),
-                                PartRequestStatus.PARTIALLY_ISSUED.getCode()));
-        if (activeRequestCount > 0) {
-            throw new BusinessException("Duplicate request: an active part request already exists for this order. " +
-                    "Please wait for the current request to be completed or cancelled.");
+        // Atomic duplicate check + creation under Redis lock
+        String requestLockKey = REQUEST_LOCK_PREFIX + orderId;
+        if (!tryLock(requestLockKey)) {
+            throw new BusinessException("Another request is being created for this order, please retry");
         }
 
-        // Determine request type
-        String requestType = OrderStatus.REWORKING.getCode().equals(status)
-                ? PartRequestType.REWORK.getCode()
-                : PartRequestType.NORMAL.getCode();
+        PartRequest partRequest;
+        boolean hasCriticalShortage;
 
-        // Create part request
-        PartRequest partRequest = new PartRequest();
-        partRequest.setOrderId(orderId);
-        partRequest.setWorkerId(workerId);
-        partRequest.setRequestNo(generatePartRequestNo());
-        partRequest.setRequestType(requestType);
-        partRequest.setStatus(PartRequestStatus.PENDING.getCode());
-        partRequest.setRemark(request.getRemark());
-        partRequestMapper.insert(partRequest);
-
-        // Create request items
-        boolean hasCriticalShortage = false;
-        for (PartRequestCreateRequest.PartItemRequest itemReq : request.getItems()) {
-            SparePart part = sparePartMapper.selectById(itemReq.getPartId());
-            if (part == null) {
-                throw new BusinessException("Part not found: " + itemReq.getPartId());
+        try {
+            // Check for duplicate active request (now atomic under lock)
+            long activeRequestCount = partRequestMapper.selectCount(
+                    new LambdaQueryWrapper<PartRequest>()
+                            .eq(PartRequest::getOrderId, orderId)
+                            .eq(PartRequest::getWorkerId, workerId)
+                            .in(PartRequest::getStatus,
+                                    PartRequestStatus.PENDING.getCode(),
+                                    PartRequestStatus.APPROVED.getCode(),
+                                    PartRequestStatus.PARTIALLY_ISSUED.getCode()));
+            if (activeRequestCount > 0) {
+                throw new BusinessException("Duplicate request: an active part request already exists for this order. " +
+                        "Please wait for the current request to be completed or cancelled.");
             }
 
-            PartRequestItem item = new PartRequestItem();
-            item.setRequestId(partRequest.getId());
-            item.setPartId(itemReq.getPartId());
-            item.setRequestedQty(itemReq.getQuantity());
-            item.setIssuedQty(0);
-            item.setReturnedQty(0);
-            item.setConsumedQty(0);
-            item.setStatus(PartRequestStatus.PENDING.getCode());
-            item.setCritical(itemReq.isCritical() ? 1 : 0);
-            partRequestItemMapper.insert(item);
+            // Determine request type
+            String requestType = OrderStatus.REWORKING.getCode().equals(status)
+                    ? PartRequestType.REWORK.getCode()
+                    : PartRequestType.NORMAL.getCode();
 
-            // Check stock availability for critical items
-            if (itemReq.isCritical()) {
-                int available = getAvailableStock(part.getId(),
-                        order.getCommunityId(), order.getBuildingId());
-                if (available < itemReq.getQuantity()) {
-                    hasCriticalShortage = true;
+            // Create part request
+            partRequest = new PartRequest();
+            partRequest.setOrderId(orderId);
+            partRequest.setWorkerId(workerId);
+            partRequest.setRequestNo(generatePartRequestNo());
+            partRequest.setRequestType(requestType);
+            partRequest.setStatus(PartRequestStatus.PENDING.getCode());
+            partRequest.setRemark(request.getRemark());
+            partRequestMapper.insert(partRequest);
+
+            // Create request items
+            hasCriticalShortage = false;
+            for (PartRequestCreateRequest.PartItemRequest itemReq : request.getItems()) {
+                SparePart part = sparePartMapper.selectById(itemReq.getPartId());
+                if (part == null) {
+                    throw new BusinessException("Part not found: " + itemReq.getPartId());
+                }
+
+                PartRequestItem item = new PartRequestItem();
+                item.setRequestId(partRequest.getId());
+                item.setPartId(itemReq.getPartId());
+                item.setRequestedQty(itemReq.getQuantity());
+                item.setIssuedQty(0);
+                item.setReturnedQty(0);
+                item.setConsumedQty(0);
+                item.setStatus(PartRequestStatus.PENDING.getCode());
+                item.setCritical(itemReq.isCritical() ? 1 : 0);
+                partRequestItemMapper.insert(item);
+
+                // Check stock availability for critical items
+                if (itemReq.isCritical()) {
+                    int available = getAvailableStock(part.getId(),
+                            order.getCommunityId(), order.getBuildingId());
+                    if (available < itemReq.getQuantity()) {
+                        hasCriticalShortage = true;
+                    }
                 }
             }
+        } finally {
+            unlock(requestLockKey);
         }
 
         // If critical parts are insufficient → enter WAITING_PARTS and pause SLA
@@ -230,23 +250,42 @@ public class SparePartServiceImpl implements SparePartService {
 
         RepairOrder order = orderMapper.selectById(request.getOrderId());
 
-        // Reserve stock for each item
         List<PartRequestItem> items = partRequestItemMapper.selectList(
                 new LambdaQueryWrapper<PartRequestItem>()
                         .eq(PartRequestItem::getRequestId, requestId));
 
-        for (PartRequestItem item : items) {
-            SparePartInventory inventory = findInventory(item.getPartId(),
-                    order.getCommunityId(), order.getBuildingId());
-            if (inventory != null) {
-                // Reserve stock (move from available to reserved)
-                int canReserve = Math.min(item.getRequestedQty(), inventory.getAvailableQty());
-                inventory.setAvailableQty(inventory.getAvailableQty() - canReserve);
-                inventory.setReservedQty(inventory.getReservedQty() + canReserve);
-                inventoryMapper.updateById(inventory);
+        // Acquire distributed locks for all inventory rows
+        List<String> acquiredLocks = new ArrayList<>();
+        try {
+            for (PartRequestItem item : items) {
+                acquiredLocks.add(lockInventoryOrThrow(
+                        item.getPartId(), order.getCommunityId(), order.getBuildingId()));
             }
-            item.setStatus(PartRequestStatus.APPROVED.getCode());
-            partRequestItemMapper.updateById(item);
+
+            // Re-read and mutate under lock
+            for (PartRequestItem item : items) {
+                SparePartInventory inventory = findInventory(item.getPartId(),
+                        order.getCommunityId(), order.getBuildingId());
+
+                // Reject insufficient stock instead of silent partial reservation
+                if (inventory == null || inventory.getAvailableQty() < item.getRequestedQty()) {
+                    int available = inventory != null ? inventory.getAvailableQty() : 0;
+                    throw new BusinessException(String.format(
+                            "Insufficient stock for part ID %d: requested %d, available %d",
+                            item.getPartId(), item.getRequestedQty(), available));
+                }
+
+                inventory.setAvailableQty(inventory.getAvailableQty() - item.getRequestedQty());
+                inventory.setReservedQty(inventory.getReservedQty() + item.getRequestedQty());
+                inventoryMapper.updateById(inventory);
+
+                item.setStatus(PartRequestStatus.APPROVED.getCode());
+                partRequestItemMapper.updateById(item);
+            }
+        } finally {
+            for (String lockKey : acquiredLocks) {
+                unlock(lockKey);
+            }
         }
 
         request.setStatus(PartRequestStatus.APPROVED.getCode());
@@ -274,40 +313,58 @@ public class SparePartServiceImpl implements SparePartService {
         }
 
         RepairOrder order = orderMapper.selectById(partRequest.getOrderId());
-        boolean allCriticalIssued = true;
 
-        for (IssuePartsRequest.IssueItem issueItem : request.getItems()) {
-            PartRequestItem item = partRequestItemMapper.selectById(issueItem.getRequestItemId());
-            if (item == null || !item.getRequestId().equals(requestId)) {
-                throw new BusinessException("Invalid request item: " + issueItem.getRequestItemId());
+        // Acquire distributed locks for all inventory rows
+        List<String> acquiredLocks = new ArrayList<>();
+        try {
+            // Collect unique lock keys and validate items
+            Set<String> lockKeysNeeded = new LinkedHashSet<>();
+            for (IssuePartsRequest.IssueItem issueItem : request.getItems()) {
+                PartRequestItem item = partRequestItemMapper.selectById(issueItem.getRequestItemId());
+                if (item == null || !item.getRequestId().equals(requestId)) {
+                    throw new BusinessException("Invalid request item: " + issueItem.getRequestItemId());
+                }
+                int issuedQty = issueItem.getIssuedQty();
+                if (issuedQty <= 0 || issuedQty > item.getRequestedQty() - item.getIssuedQty()) {
+                    throw new BusinessException("Invalid issue quantity for item: " + item.getId());
+                }
+                lockKeysNeeded.add(inventoryLockKey(
+                        item.getPartId(), order.getCommunityId(), order.getBuildingId()));
+            }
+            for (String key : lockKeysNeeded) {
+                if (!tryLock(key)) {
+                    throw new BusinessException("Inventory is being processed by another operation, please retry");
+                }
+                acquiredLocks.add(key);
             }
 
-            int issuedQty = issueItem.getIssuedQty();
-            if (issuedQty <= 0 || issuedQty > item.getRequestedQty() - item.getIssuedQty()) {
-                throw new BusinessException("Invalid issue quantity for item: " + item.getId());
-            }
+            // Process each item under lock
+            for (IssuePartsRequest.IssueItem issueItem : request.getItems()) {
+                PartRequestItem item = partRequestItemMapper.selectById(issueItem.getRequestItemId());
 
-            // Deduct from inventory (reserved → issued)
-            SparePartInventory inventory = findInventory(item.getPartId(),
-                    order.getCommunityId(), order.getBuildingId());
-            if (inventory != null) {
-                int deductFromReserved = Math.min(issuedQty, inventory.getReservedQty());
-                inventory.setReservedQty(inventory.getReservedQty() - deductFromReserved);
-                inventory.setTotalQty(inventory.getTotalQty() - deductFromReserved);
-                inventoryMapper.updateById(inventory);
-            }
+                int issuedQty = issueItem.getIssuedQty();
 
-            item.setIssuedQty(item.getIssuedQty() + issuedQty);
-            if (item.getIssuedQty() >= item.getRequestedQty()) {
-                item.setStatus(PartRequestStatus.ISSUED.getCode());
-            } else {
-                item.setStatus("PARTIALLY_ISSUED");
-            }
-            partRequestItemMapper.updateById(item);
+                // Re-read inventory under lock
+                SparePartInventory inventory = findInventory(item.getPartId(),
+                        order.getCommunityId(), order.getBuildingId());
+                if (inventory != null) {
+                    int deductFromReserved = Math.min(issuedQty, inventory.getReservedQty());
+                    inventory.setReservedQty(inventory.getReservedQty() - deductFromReserved);
+                    inventory.setTotalQty(inventory.getTotalQty() - deductFromReserved);
+                    inventoryMapper.updateById(inventory);
+                }
 
-            // Check if critical item is fully issued
-            if (item.getCritical() == 1 && item.getIssuedQty() < item.getRequestedQty()) {
-                allCriticalIssued = false;
+                item.setIssuedQty(item.getIssuedQty() + issuedQty);
+                if (item.getIssuedQty() >= item.getRequestedQty()) {
+                    item.setStatus(PartRequestStatus.ISSUED.getCode());
+                } else {
+                    item.setStatus("PARTIALLY_ISSUED");
+                }
+                partRequestItemMapper.updateById(item);
+            }
+        } finally {
+            for (String lockKey : acquiredLocks) {
+                unlock(lockKey);
             }
         }
 
@@ -326,9 +383,9 @@ public class SparePartServiceImpl implements SparePartService {
         }
         partRequestMapper.updateById(partRequest);
 
-        // If order is in WAITING_PARTS and all critical parts are now issued, auto-resume
+        // If order is in WAITING_PARTS, check ALL active requests (not just current batch)
         if (order != null && OrderStatus.WAITING_PARTS.getCode().equals(order.getStatus())
-                && allCriticalIssued) {
+                && canResumeOrder(order)) {
             resumeFromWaitingParts(order);
         }
 
@@ -352,27 +409,53 @@ public class SparePartServiceImpl implements SparePartService {
 
         RepairOrder order = orderMapper.selectById(partRequest.getOrderId());
 
-        for (ReturnPartsRequest.ReturnItem returnItem : request.getItems()) {
-            PartRequestItem item = partRequestItemMapper.selectById(returnItem.getRequestItemId());
-            if (item == null || !item.getRequestId().equals(requestId)) {
-                throw new BusinessException("Invalid request item: " + returnItem.getRequestItemId());
+        // Acquire distributed locks for all inventory rows
+        List<String> acquiredLocks = new ArrayList<>();
+        try {
+            Set<String> lockKeysNeeded = new LinkedHashSet<>();
+            for (ReturnPartsRequest.ReturnItem returnItem : request.getItems()) {
+                PartRequestItem item = partRequestItemMapper.selectById(returnItem.getRequestItemId());
+                if (item == null || !item.getRequestId().equals(requestId)) {
+                    throw new BusinessException("Invalid request item: " + returnItem.getRequestItemId());
+                }
+                int returnableQty = item.getIssuedQty() - item.getReturnedQty() - item.getConsumedQty();
+                if (returnItem.getReturnedQty() <= 0 || returnItem.getReturnedQty() > returnableQty) {
+                    throw new BusinessException("Invalid return quantity for item: " + item.getId()
+                            + ", returnable: " + returnableQty);
+                }
+                lockKeysNeeded.add(inventoryLockKey(
+                        item.getPartId(), order.getCommunityId(), order.getBuildingId()));
+            }
+            for (String key : lockKeysNeeded) {
+                if (!tryLock(key)) {
+                    throw new BusinessException("Inventory is being processed by another operation, please retry");
+                }
+                acquiredLocks.add(key);
             }
 
-            int returnableQty = item.getIssuedQty() - item.getReturnedQty() - item.getConsumedQty();
-            if (returnItem.getReturnedQty() <= 0 || returnItem.getReturnedQty() > returnableQty) {
-                throw new BusinessException("Invalid return quantity for item: " + item.getId()
-                        + ", returnable: " + returnableQty);
+            for (ReturnPartsRequest.ReturnItem returnItem : request.getItems()) {
+                PartRequestItem item = partRequestItemMapper.selectById(returnItem.getRequestItemId());
+
+                int returnableQty = item.getIssuedQty() - item.getReturnedQty() - item.getConsumedQty();
+                if (returnItem.getReturnedQty() <= 0 || returnItem.getReturnedQty() > returnableQty) {
+                    throw new BusinessException("Invalid return quantity for item: " + item.getId()
+                            + ", returnable: " + returnableQty);
+                }
+
+                // Re-read inventory under lock
+                SparePartInventory inventory = findOrCreateInventory(item.getPartId(),
+                        order.getCommunityId(), order.getBuildingId());
+                inventory.setAvailableQty(inventory.getAvailableQty() + returnItem.getReturnedQty());
+                inventory.setTotalQty(inventory.getTotalQty() + returnItem.getReturnedQty());
+                inventoryMapper.updateById(inventory);
+
+                item.setReturnedQty(item.getReturnedQty() + returnItem.getReturnedQty());
+                partRequestItemMapper.updateById(item);
             }
-
-            // Add back to inventory
-            SparePartInventory inventory = findOrCreateInventory(item.getPartId(),
-                    order.getCommunityId(), order.getBuildingId());
-            inventory.setAvailableQty(inventory.getAvailableQty() + returnItem.getReturnedQty());
-            inventory.setTotalQty(inventory.getTotalQty() + returnItem.getReturnedQty());
-            inventoryMapper.updateById(inventory);
-
-            item.setReturnedQty(item.getReturnedQty() + returnItem.getReturnedQty());
-            partRequestItemMapper.updateById(item);
+        } finally {
+            for (String lockKey : acquiredLocks) {
+                unlock(lockKey);
+            }
         }
 
         // Check if all items are returned
@@ -438,6 +521,7 @@ public class SparePartServiceImpl implements SparePartService {
         purchase.setPurchaseNo(generatePurchaseNo());
         purchase.setPartId(request.getPartId());
         purchase.setCommunityId(request.getCommunityId());
+        purchase.setBuildingId(request.getBuildingId());
         purchase.setQuantity(request.getQuantity());
         purchase.setUrgency(request.getUrgency());
         purchase.setStatus(PurchaseRequestStatus.PENDING.getCode());
@@ -510,12 +594,18 @@ public class SparePartServiceImpl implements SparePartService {
             throw new BusinessException("Only ORDERED purchase requests can receive parts");
         }
 
-        // Increase inventory
-        SparePartInventory inventory = findOrCreateInventory(
-                purchase.getPartId(), purchase.getCommunityId(), null);
-        inventory.setAvailableQty(inventory.getAvailableQty() + purchase.getQuantity());
-        inventory.setTotalQty(inventory.getTotalQty() + purchase.getQuantity());
-        inventoryMapper.updateById(inventory);
+        // Acquire lock and restock at the correct building-level warehouse
+        String lockKey = lockInventoryOrThrow(
+                purchase.getPartId(), purchase.getCommunityId(), purchase.getBuildingId());
+        try {
+            SparePartInventory inventory = findOrCreateInventory(
+                    purchase.getPartId(), purchase.getCommunityId(), purchase.getBuildingId());
+            inventory.setAvailableQty(inventory.getAvailableQty() + purchase.getQuantity());
+            inventory.setTotalQty(inventory.getTotalQty() + purchase.getQuantity());
+            inventoryMapper.updateById(inventory);
+        } finally {
+            unlock(lockKey);
+        }
 
         purchase.setStatus(PurchaseRequestStatus.RECEIVED.getCode());
         purchase.setReceivedAt(LocalDateTime.now());
@@ -528,8 +618,8 @@ public class SparePartServiceImpl implements SparePartService {
                         "quantity", purchase.getQuantity()),
                 "Parts received and stocked");
 
-        // Check if any WAITING_PARTS orders can now be resumed
-        checkAndResumeWaitingOrders(purchase.getCommunityId(), null);
+        // Check if any WAITING_PARTS orders at this location can now be resumed
+        checkAndResumeWaitingOrders(purchase.getCommunityId(), purchase.getBuildingId());
     }
 
     // ==========================================================================
@@ -663,7 +753,11 @@ public class SparePartServiceImpl implements SparePartService {
         orderMapper.updateById(order);
 
         // Re-establish Redis timeout keys with adjusted deadlines
+        // Re-establish Redis timeout keys with adjusted deadlines
         reestablishTimeoutKeys(order, resumeTo);
+
+        // Clear old unhandled escalation records so re-escalation works with adjusted deadlines
+        clearEscalationRecordsForCurrentRound(order);
 
         // Record progress
         recordProgress(order.getId(), OrderStatus.WAITING_PARTS.getCode(), resumeTo,
@@ -787,6 +881,59 @@ public class SparePartServiceImpl implements SparePartService {
     }
 
     // ==========================================================================
+    // Private Helpers — Distributed Lock
+    // ==========================================================================
+
+    private String inventoryLockKey(Long partId, Long communityId, Long buildingId) {
+        return INVENTORY_LOCK_PREFIX + partId + ":" + communityId + ":"
+                + (buildingId != null ? buildingId : "null");
+    }
+
+    private boolean tryLock(String lockKey) {
+        for (int i = 0; i < LOCK_RETRY_MAX; i++) {
+            Boolean acquired = redisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, "1", LOCK_TTL);
+            if (Boolean.TRUE.equals(acquired)) {
+                return true;
+            }
+            try {
+                Thread.sleep(LOCK_RETRY_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private void unlock(String lockKey) {
+        redisTemplate.delete(lockKey);
+    }
+
+    private String lockInventoryOrThrow(Long partId, Long communityId, Long buildingId) {
+        String key = inventoryLockKey(partId, communityId, buildingId);
+        if (!tryLock(key)) {
+            throw new BusinessException("Inventory is being processed by another operation, please retry");
+        }
+        return key;
+    }
+
+    /**
+     * Delete unhandled escalation records for the current dispatch round
+     * so new escalations can fire based on adjusted SLA deadlines after
+     * WAITING_PARTS resume.
+     */
+    private void clearEscalationRecordsForCurrentRound(RepairOrder order) {
+        Long currentDispatchId = order.getCurrentDispatchId();
+        if (currentDispatchId == null) return;
+        LambdaQueryWrapper<TimeoutEscalation> wrapper = new LambdaQueryWrapper<TimeoutEscalation>()
+                .eq(TimeoutEscalation::getOrderId, order.getId())
+                .eq(TimeoutEscalation::getDispatchId, currentDispatchId)
+                .eq(TimeoutEscalation::getHandled, 0);
+        escalationMapper.delete(wrapper);
+    }
+
+    // ==========================================================================
     // Private Helpers — VO Builders
     // ==========================================================================
 
@@ -860,6 +1007,7 @@ public class SparePartServiceImpl implements SparePartService {
         vo.setPurchaseNo(purchase.getPurchaseNo());
         vo.setPartId(purchase.getPartId());
         vo.setCommunityId(purchase.getCommunityId());
+        vo.setBuildingId(purchase.getBuildingId());
         vo.setQuantity(purchase.getQuantity());
         vo.setUrgency(purchase.getUrgency());
         vo.setStatus(purchase.getStatus());
