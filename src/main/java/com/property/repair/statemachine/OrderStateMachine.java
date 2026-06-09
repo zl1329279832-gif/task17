@@ -37,10 +37,12 @@ public class OrderStateMachine {
 
         allow(OrderStatus.DISPATCHED,  OrderStatus.ACCEPTED);
         allow(OrderStatus.DISPATCHED,  OrderStatus.PENDING);        // reject → back to pending
+        allow(OrderStatus.DISPATCHED,  OrderStatus.DISPATCHED);     // admin manual reassignment
 
         allow(OrderStatus.ACCEPTED,    OrderStatus.VISITING);
         allow(OrderStatus.ACCEPTED,    OrderStatus.SUSPENDED);
         allow(OrderStatus.ACCEPTED,    OrderStatus.TRANSFERRED);
+        allow(OrderStatus.ACCEPTED,    OrderStatus.DISPATCHED);     // admin manual reassignment
 
         allow(OrderStatus.VISITING,    OrderStatus.COMPLETED);
         allow(OrderStatus.VISITING,    OrderStatus.SUSPENDED);

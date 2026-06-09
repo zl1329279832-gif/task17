@@ -2,6 +2,7 @@ package com.property.repair.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.property.repair.dispatch.DefaultDispatchStrategy;
+import com.property.repair.dto.ManualDispatchRequest;
 import com.property.repair.dto.RepairOrderSubmitRequest;
 import com.property.repair.dto.RepairOrderVO;
 import com.property.repair.entity.RepairOrder;
@@ -50,18 +51,30 @@ class RepairOrderServiceTest {
     private OrderStateMachine stateMachine;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         stateMachine = new OrderStateMachine();
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        lenient().when(redisTemplate.delete(any())).thenReturn(true);
+        lenient().when(redisTemplate.delete(anyString())).thenReturn(true);
         lenient().when(valueOperations.setIfAbsent(any(), any(), any(java.time.Duration.class)))
                 .thenReturn(true);
+
+        // Default empty lists for buildVO() calls
+        lenient().when(attachmentMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(progressMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(reworkOrderMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(reviewMapper.selectOne(any())).thenReturn(null);
 
         orderService = new RepairOrderServiceImpl(
                 orderMapper, dispatchRecordMapper, progressMapper,
                 reviewMapper, reworkOrderMapper, userMapper,
                 attachmentMapper, auditService, dispatchStrategy,
                 stateMachine, redisTemplate);
+
+        // ServiceImpl.baseMapper must be set for getById() to work
+        var field = com.baomidou.mybatisplus.extension.service.impl.ServiceImpl.class
+                .getDeclaredField("baseMapper");
+        field.setAccessible(true);
+        field.set(orderService, orderMapper);
     }
 
     @Test
@@ -83,6 +96,8 @@ class RepairOrderServiceTest {
             RepairOrder o = inv.getArgument(0);
             o.setId(100L);
             o.setOrderNo("RO20260101000001");
+            // Allow getById() to find the order after insert
+            when(orderMapper.selectById(100L)).thenReturn(o);
             return 1;
         });
 
@@ -251,5 +266,229 @@ class RepairOrderServiceTest {
 
         verify(orderMapper, times(2)).updateById(captor.capture());
         assertEquals("VISITING", captor.getAllValues().get(1).getStatus());
+    }
+
+    // ==========================================================================
+    // New tests: Manual dispatch, rework rounds, suspend/resume SLA
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Manual dispatch from DISPATCHED — clears old timeout keys and reassigns")
+    void manualDispatch_fromDispatched_clearsTimeoutsAndReassigns() {
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setStatus(OrderStatus.DISPATCHED.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setDispatchRound(1);
+        order.setOrderNo("RO001");
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+        when(dispatchRecordMapper.insert(any())).thenReturn(1);
+
+        User newWorker = new User();
+        newWorker.setId(5L);
+        newWorker.setRealName("Li Si");
+        newWorker.setRole("WORKER");
+        when(userMapper.selectById(5L)).thenReturn(newWorker);
+        when(orderMapper.countActiveOrders(5L)).thenReturn(1);
+
+        var request = new ManualDispatchRequest();
+        request.setWorkerId(5L);
+        request.setReason("Reassign to specialist");
+
+        orderService.manualDispatch(1L, request);
+
+        // Verify old timeout keys were cleared (called in both manualDispatch and doDispatch)
+        verify(redisTemplate, atLeast(1)).delete("timeout:accept:1");
+        verify(redisTemplate, atLeast(1)).delete("timeout:visit:1");
+        verify(redisTemplate, atLeast(1)).delete("timeout:complete:1");
+
+        // Verify dispatch round incremented
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper, atLeastOnce()).updateById(captor.capture());
+        RepairOrder updated = captor.getAllValues().get(captor.getAllValues().size() - 1);
+        assertEquals(OrderStatus.DISPATCHED.getCode(), updated.getStatus());
+        assertEquals(5L, updated.getAssignedWorkerId());
+        assertEquals(2, updated.getDispatchRound());
+        // Downstream timestamps reset
+        assertNull(updated.getAcceptedAt());
+        assertNull(updated.getVisitAt());
+    }
+
+    @Test
+    @DisplayName("Manual dispatch from ACCEPTED — admin reassignment works")
+    void manualDispatch_fromAccepted_reassigns() {
+        RepairOrder order = new RepairOrder();
+        order.setId(2L);
+        order.setStatus(OrderStatus.ACCEPTED.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setAcceptedAt(LocalDateTime.now().minusHours(1));
+        order.setDispatchRound(1);
+        order.setOrderNo("RO002");
+        when(orderMapper.selectById(2L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+        when(dispatchRecordMapper.insert(any())).thenReturn(1);
+
+        User newWorker = new User();
+        newWorker.setId(6L);
+        newWorker.setRealName("Wang Wu");
+        newWorker.setRole("WORKER");
+        when(userMapper.selectById(6L)).thenReturn(newWorker);
+        when(orderMapper.countActiveOrders(6L)).thenReturn(0);
+
+        var request = new ManualDispatchRequest();
+        request.setWorkerId(6L);
+        request.setReason("Worker unavailable");
+
+        orderService.manualDispatch(2L, request);
+
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper, atLeastOnce()).updateById(captor.capture());
+        RepairOrder updated = captor.getAllValues().get(captor.getAllValues().size() - 1);
+        assertEquals(OrderStatus.DISPATCHED.getCode(), updated.getStatus());
+        assertEquals(6L, updated.getAssignedWorkerId());
+        assertEquals(2, updated.getDispatchRound());
+    }
+
+    @Test
+    @DisplayName("Rework increments repair round and clears old timeout markers")
+    void rework_incrementsRepairRound() {
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setStatus(OrderStatus.COMPLETED.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setOwnerId(8L);
+        order.setOrderNo("RO001");
+        order.setRepairRound(1);
+        order.setDispatchRound(1);
+        order.setCompletedAt(LocalDateTime.now());
+        order.setVisitAt(LocalDateTime.now().minusHours(2));
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+        when(reworkOrderMapper.insert(any())).thenReturn(1);
+
+        var request = new com.property.repair.dto.ReworkRequest();
+        request.setReason("Still leaking");
+
+        orderService.requestRework(1L, request);
+
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        RepairOrder updated = captor.getValue();
+        assertEquals(OrderStatus.REWORKING.getCode(), updated.getStatus());
+        assertEquals(2, updated.getRepairRound());
+        // Timestamps reset for fresh cycle
+        assertNull(updated.getCompletedAt());
+        assertNull(updated.getVisitAt());
+
+        // Verify processed markers cleared
+        verify(redisTemplate).delete("timeout:processed:ACCEPT_TIMEOUT:1");
+        verify(redisTemplate).delete("timeout:processed:VISIT_TIMEOUT:1");
+        verify(redisTemplate).delete("timeout:processed:COMPLETE_TIMEOUT:1");
+    }
+
+    @Test
+    @DisplayName("Suspend order — clears all timeout keys and sets suspendedAt")
+    void suspend_clearsTimeoutKeys() {
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setStatus(OrderStatus.VISITING.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setOrderNo("RO001");
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        var suspendReq = new com.property.repair.dto.SuspendRequest();
+        suspendReq.setReason("Waiting for parts");
+        orderService.suspendOrder(1L, suspendReq);
+
+        // Verify timeout keys cleared
+        verify(redisTemplate).delete("timeout:accept:1");
+        verify(redisTemplate).delete("timeout:visit:1");
+        verify(redisTemplate).delete("timeout:complete:1");
+
+        // Verify suspendedAt set
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        assertNotNull(captor.getValue().getSuspendedAt());
+        assertEquals(OrderStatus.SUSPENDED.getCode(), captor.getValue().getStatus());
+    }
+
+    @Test
+    @DisplayName("Resume from VISITING — adjusts visitAt by pause duration and resets timeout")
+    void resume_fromVisiting_adjustsVisitAtAndResetsTimeout() {
+        LocalDateTime visitTime = LocalDateTime.now().minusHours(3);
+        LocalDateTime suspendTime = LocalDateTime.now().minusHours(1);
+
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setStatus(OrderStatus.SUSPENDED.getCode());
+        order.setPreviousStatus(OrderStatus.VISITING.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setVisitAt(visitTime);
+        order.setSuspendedAt(suspendTime);
+        order.setOrderNo("RO001");
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        orderService.resumeOrder(1L, 4L);
+
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        RepairOrder resumed = captor.getValue();
+
+        // Status restored
+        assertEquals(OrderStatus.VISITING.getCode(), resumed.getStatus());
+        assertNull(resumed.getSuspendedAt());
+        assertNull(resumed.getPreviousStatus());
+
+        // visitAt shifted forward by ~1 hour (pause duration)
+        assertTrue(resumed.getVisitAt().isAfter(visitTime));
+
+        // Complete timeout re-set in Redis
+        verify(valueOperations).set(
+                eq("timeout:complete:1"),
+                any(String.class),
+                eq(java.time.Duration.ofHours(49)));
+    }
+
+    @Test
+    @DisplayName("Resume from ACCEPTED — adjusts acceptedAt and resets visit timeout")
+    void resume_fromAccepted_adjustsAcceptedAtAndResetsTimeout() {
+        LocalDateTime acceptTime = LocalDateTime.now().minusHours(2);
+        LocalDateTime suspendTime = LocalDateTime.now().minusMinutes(30);
+
+        RepairOrder order = new RepairOrder();
+        order.setId(2L);
+        order.setStatus(OrderStatus.SUSPENDED.getCode());
+        order.setPreviousStatus(OrderStatus.ACCEPTED.getCode());
+        order.setAssignedWorkerId(4L);
+        order.setAcceptedAt(acceptTime);
+        order.setSuspendedAt(suspendTime);
+        order.setOrderNo("RO002");
+        when(orderMapper.selectById(2L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        orderService.resumeOrder(2L, 4L);
+
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        RepairOrder resumed = captor.getValue();
+
+        assertEquals(OrderStatus.ACCEPTED.getCode(), resumed.getStatus());
+        // acceptedAt shifted forward by ~30 minutes
+        assertTrue(resumed.getAcceptedAt().isAfter(acceptTime));
+
+        // Visit timeout re-set
+        verify(valueOperations).set(
+                eq("timeout:visit:2"),
+                any(String.class),
+                eq(java.time.Duration.ofHours(5)));
     }
 }

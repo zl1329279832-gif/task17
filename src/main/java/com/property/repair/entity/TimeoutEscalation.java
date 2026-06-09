@@ -33,6 +33,12 @@ public class TimeoutEscalation {
 
     private String handleRemark;
 
+    /** Dispatch round when this escalation was created */
+    private Integer dispatchRound;
+
+    /** Repair round when this escalation was created */
+    private Integer repairRound;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 }

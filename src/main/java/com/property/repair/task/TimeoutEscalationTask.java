@@ -17,18 +17,15 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Periodic task that checks for timeout conditions and triggers escalation.
  *
  * Prevents duplicate triggers by:
- * 1. Checking if escalation record already exists for this order+type
- * 2. Using Redis to track recently processed timeouts
- * 3. Only processing non-terminal orders
+ * 1. Checking if escalation record already exists for this order+type+round
+ * 2. Using Redis to track recently processed timeouts (round-scoped)
+ * 3. Only processing non-terminal, non-suspended orders
  */
 @Slf4j
 @Component
@@ -59,16 +56,19 @@ public class TimeoutEscalationTask {
                         .isNotNull(RepairOrder::getAssignedAt));
 
         for (RepairOrder order : dispatchedOrders) {
-            if (isAlreadyProcessed(order.getId(), TimeoutType.ACCEPT_TIMEOUT)) {
+            int dr = order.getDispatchRound() != null ? order.getDispatchRound() : 1;
+            int rr = order.getRepairRound() != null ? order.getRepairRound() : 1;
+
+            if (isAlreadyProcessed(order.getId(), TimeoutType.ACCEPT_TIMEOUT, dr, rr)) {
                 continue;
             }
 
             LocalDateTime deadline = order.getAssignedAt().plusMinutes(ACCEPT_MINUTES);
             if (LocalDateTime.now().isAfter(deadline.plusMinutes(ESCALATION_DELAY_MINUTES))) {
-                createEscalation(order, TimeoutType.ACCEPT_TIMEOUT, deadline, 1);
-                markAsProcessed(order.getId(), TimeoutType.ACCEPT_TIMEOUT);
-                log.info("Accept timeout escalated: order={}, worker={}",
-                        order.getOrderNo(), order.getAssignedWorkerId());
+                createEscalation(order, TimeoutType.ACCEPT_TIMEOUT, deadline, 1, dr, rr);
+                markAsProcessed(order.getId(), TimeoutType.ACCEPT_TIMEOUT, dr, rr);
+                log.info("Accept timeout escalated: order={}, worker={}, dispatchRound={}",
+                        order.getOrderNo(), order.getAssignedWorkerId(), dr);
             }
         }
     }
@@ -86,16 +86,19 @@ public class TimeoutEscalationTask {
                         .isNotNull(RepairOrder::getAcceptedAt));
 
         for (RepairOrder order : acceptedOrders) {
-            if (isAlreadyProcessed(order.getId(), TimeoutType.VISIT_TIMEOUT)) {
+            int dr = order.getDispatchRound() != null ? order.getDispatchRound() : 1;
+            int rr = order.getRepairRound() != null ? order.getRepairRound() : 1;
+
+            if (isAlreadyProcessed(order.getId(), TimeoutType.VISIT_TIMEOUT, dr, rr)) {
                 continue;
             }
 
             LocalDateTime deadline = order.getAcceptedAt().plusHours(VISIT_HOURS);
             if (LocalDateTime.now().isAfter(deadline.plusMinutes(ESCALATION_DELAY_MINUTES))) {
-                createEscalation(order, TimeoutType.VISIT_TIMEOUT, deadline, 1);
-                markAsProcessed(order.getId(), TimeoutType.VISIT_TIMEOUT);
-                log.info("Visit timeout escalated: order={}, worker={}",
-                        order.getOrderNo(), order.getAssignedWorkerId());
+                createEscalation(order, TimeoutType.VISIT_TIMEOUT, deadline, 1, dr, rr);
+                markAsProcessed(order.getId(), TimeoutType.VISIT_TIMEOUT, dr, rr);
+                log.info("Visit timeout escalated: order={}, worker={}, dispatchRound={}",
+                        order.getOrderNo(), order.getAssignedWorkerId(), dr);
             }
         }
     }
@@ -113,16 +116,19 @@ public class TimeoutEscalationTask {
                         .isNotNull(RepairOrder::getVisitAt));
 
         for (RepairOrder order : visitingOrders) {
-            if (isAlreadyProcessed(order.getId(), TimeoutType.COMPLETE_TIMEOUT)) {
+            int dr = order.getDispatchRound() != null ? order.getDispatchRound() : 1;
+            int rr = order.getRepairRound() != null ? order.getRepairRound() : 1;
+
+            if (isAlreadyProcessed(order.getId(), TimeoutType.COMPLETE_TIMEOUT, dr, rr)) {
                 continue;
             }
 
             LocalDateTime deadline = order.getVisitAt().plusHours(COMPLETE_HOURS);
             if (LocalDateTime.now().isAfter(deadline.plusMinutes(ESCALATION_DELAY_MINUTES))) {
-                createEscalation(order, TimeoutType.COMPLETE_TIMEOUT, deadline, 1);
-                markAsProcessed(order.getId(), TimeoutType.COMPLETE_TIMEOUT);
-                log.info("Complete timeout escalated: order={}, worker={}",
-                        order.getOrderNo(), order.getAssignedWorkerId());
+                createEscalation(order, TimeoutType.COMPLETE_TIMEOUT, deadline, 1, dr, rr);
+                markAsProcessed(order.getId(), TimeoutType.COMPLETE_TIMEOUT, dr, rr);
+                log.info("Complete timeout escalated: order={}, worker={}, repairRound={}",
+                        order.getOrderNo(), order.getAssignedWorkerId(), rr);
             }
         }
     }
@@ -143,22 +149,40 @@ public class TimeoutEscalationTask {
 
         for (TimeoutEscalation esc : unhandled) {
             RepairOrder order = orderMapper.selectById(esc.getOrderId());
-            if (order != null && !order.getStatus().equals(OrderStatus.REVIEWED.getCode())
-                    && !order.getStatus().equals(OrderStatus.CLOSED.getCode())) {
-                // Create second-level escalation to admin
-                createEscalation(order,
-                        TimeoutType.valueOf(esc.getTimeoutType()),
-                        esc.getDeadline(), 2);
-                log.info("Second-level escalation: order={}, type={}",
-                        order.getOrderNo(), esc.getTimeoutType());
+            if (order == null) continue;
+
+            // Skip terminal states
+            String status = order.getStatus();
+            if (OrderStatus.REVIEWED.getCode().equals(status)
+                    || OrderStatus.CLOSED.getCode().equals(status)
+                    || OrderStatus.CANCELLED.getCode().equals(status)) {
+                continue;
             }
+
+            // Skip if the order's round has changed since the escalation was created
+            // (means the order was reassigned or reworked, making this escalation stale)
+            int currentDr = order.getDispatchRound() != null ? order.getDispatchRound() : 1;
+            int currentRr = order.getRepairRound() != null ? order.getRepairRound() : 1;
+            int escDr = esc.getDispatchRound() != null ? esc.getDispatchRound() : 1;
+            int escRr = esc.getRepairRound() != null ? esc.getRepairRound() : 1;
+            if (currentDr != escDr || currentRr != escRr) {
+                continue;
+            }
+
+            // Create second-level escalation to admin
+            createEscalation(order,
+                    TimeoutType.valueOf(esc.getTimeoutType()),
+                    esc.getDeadline(), 2, currentDr, currentRr);
+            log.info("Second-level escalation: order={}, type={}",
+                    order.getOrderNo(), esc.getTimeoutType());
         }
     }
 
     // ---- Helpers ----
 
     private void createEscalation(RepairOrder order, TimeoutType type,
-                                   LocalDateTime deadline, int level) {
+                                   LocalDateTime deadline, int level,
+                                   int dispatchRound, int repairRound) {
         // Find supervisor for the community
         Long supervisorId = findSupervisor(order.getCommunityId(), level);
 
@@ -169,6 +193,8 @@ public class TimeoutEscalationTask {
         escalation.setEscalatedTo(supervisorId);
         escalation.setEscalationLevel(level);
         escalation.setHandled(0);
+        escalation.setDispatchRound(dispatchRound);
+        escalation.setRepairRound(repairRound);
         escalationMapper.insert(escalation);
     }
 
@@ -193,28 +219,39 @@ public class TimeoutEscalationTask {
     }
 
     /**
-     * Check if this order+timeoutType has already been processed.
+     * Check if this order+timeoutType+round has already been processed.
      * Uses both database and Redis to prevent duplicates.
+     * Round-scoped: a new dispatch/repair round resets processing state.
      */
-    private boolean isAlreadyProcessed(Long orderId, TimeoutType type) {
+    private boolean isAlreadyProcessed(Long orderId, TimeoutType type,
+                                        int dispatchRound, int repairRound) {
         // Check Redis first (fast)
-        String redisKey = PROCESSED_KEY_PREFIX + type.getCode() + ":" + orderId;
+        String redisKey = buildProcessedKey(orderId, type, dispatchRound, repairRound);
         Boolean exists = redisTemplate.hasKey(redisKey);
         if (exists != null && exists) return true;
 
-        // Check database
+        // Check database — only for the current round
         long count = escalationMapper.selectCount(
                 new LambdaQueryWrapper<TimeoutEscalation>()
                         .eq(TimeoutEscalation::getOrderId, orderId)
-                        .eq(TimeoutEscalation::getTimeoutType, type.getCode()));
+                        .eq(TimeoutEscalation::getTimeoutType, type.getCode())
+                        .eq(TimeoutEscalation::getDispatchRound, dispatchRound)
+                        .eq(TimeoutEscalation::getRepairRound, repairRound));
         return count > 0;
     }
 
     /**
      * Mark as processed in Redis with TTL to prevent re-processing within 24h.
      */
-    private void markAsProcessed(Long orderId, TimeoutType type) {
-        String redisKey = PROCESSED_KEY_PREFIX + type.getCode() + ":" + orderId;
+    private void markAsProcessed(Long orderId, TimeoutType type,
+                                  int dispatchRound, int repairRound) {
+        String redisKey = buildProcessedKey(orderId, type, dispatchRound, repairRound);
         redisTemplate.opsForValue().set(redisKey, "1", java.time.Duration.ofHours(24));
+    }
+
+    private String buildProcessedKey(Long orderId, TimeoutType type,
+                                      int dispatchRound, int repairRound) {
+        return PROCESSED_KEY_PREFIX + type.getCode() + ":" + orderId
+                + ":" + dispatchRound + ":" + repairRound;
     }
 }

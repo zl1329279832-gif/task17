@@ -51,6 +51,14 @@ public class RepairOrder {
 
     private String suspendReason;
 
+    /** Incremented on each dispatch/reassignment */
+    private Integer dispatchRound;
+
+    /** Incremented on each rework */
+    private Integer repairRound;
+
+    private LocalDateTime suspendedAt;
+
     // ---- Timestamps ----
     private LocalDateTime submittedAt;
 

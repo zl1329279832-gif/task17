@@ -9,7 +9,6 @@ import com.property.repair.dto.*;
 import com.property.repair.entity.*;
 import com.property.repair.enums.*;
 import com.property.repair.exception.BusinessException;
-import com.property.repair.exception.DuplicateOrderException;
 import com.property.repair.exception.InvalidStateTransitionException;
 import com.property.repair.mapper.*;
 import com.property.repair.service.AuditService;
@@ -157,14 +156,19 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void manualDispatch(Long orderId, ManualDispatchRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.PENDING, OrderStatus.TRANSFERRED);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.DISPATCHED.getCode());
 
         User worker = userMapper.selectById(request.getWorkerId());
         if (worker == null || !UserRole.WORKER.getCode().equals(worker.getRole())) {
             throw new BusinessException("Invalid worker");
         }
 
-        doDispatch(order, worker, DispatchType.MANUAL, request.getReason(), null);
+        // Clear old timeout keys and processed markers before re-dispatching
+        clearAllTimeoutKeys(orderId);
+        clearProcessedMarkers(orderId);
+
+        Long fromWorkerId = order.getAssignedWorkerId();
+        doDispatch(order, worker, DispatchType.MANUAL, request.getReason(), fromWorkerId);
     }
 
     private void tryAutoDispatch(RepairOrder order) {
@@ -189,6 +193,14 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             String fromStatus = order.getStatus();
             int currentLoad = orderMapper.countActiveOrders(worker.getId());
 
+            // Clear all previous timeout keys and processed markers
+            clearAllTimeoutKeys(order.getId());
+            clearProcessedMarkers(order.getId());
+
+            // Increment dispatch round
+            int newRound = (order.getDispatchRound() != null ? order.getDispatchRound() : 0) + 1;
+            order.setDispatchRound(newRound);
+
             // Update order
             order.setAssignedWorkerId(worker.getId());
             if (order.getOriginalWorkerId() == null) {
@@ -196,6 +208,9 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             }
             order.setStatus(OrderStatus.DISPATCHED.getCode());
             order.setAssignedAt(LocalDateTime.now());
+            // Reset downstream timestamps for fresh cycle
+            order.setAcceptedAt(null);
+            order.setVisitAt(null);
             orderMapper.updateById(order);
 
             // Record dispatch
@@ -219,8 +234,9 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
                     java.time.Duration.ofMinutes(35));
 
             auditService.log(order.getId(), "DISPATCH_ORDER", worker.getId(), type.getCode(),
-                    Map.of("status", fromStatus),
-                    Map.of("status", OrderStatus.DISPATCHED.getCode(), "worker", worker.getRealName()),
+                    Map.of("status", fromStatus, "dispatchRound", newRound - 1),
+                    Map.of("status", OrderStatus.DISPATCHED.getCode(), "worker", worker.getRealName(),
+                            "dispatchRound", newRound),
                     null);
         } finally {
             redisTemplate.delete(lockKey);
@@ -264,17 +280,23 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void rejectOrder(Long orderId, Long workerId, String reason) {
         RepairOrder order = getById(orderId);
         assertWorkerOwnership(order, workerId);
-        assertStatus(order, OrderStatus.DISPATCHED);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.PENDING.getCode());
 
+        String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.PENDING.getCode());
         order.setAssignedWorkerId(null);
         orderMapper.updateById(order);
 
         // Clear accept timeout
-        redisTemplate.delete("timeout:accept:" + orderId);
+        clearAllTimeoutKeys(orderId);
+        clearProcessedMarkers(orderId);
 
-        recordProgress(orderId, OrderStatus.DISPATCHED.getCode(), OrderStatus.PENDING.getCode(),
+        recordProgress(orderId, fromStatus, OrderStatus.PENDING.getCode(),
                 workerId, UserRole.WORKER.getCode(), "Worker rejected: " + reason);
+
+        auditService.log(orderId, "REJECT_ORDER", workerId, UserRole.WORKER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.PENDING.getCode(), "reason", reason), null);
 
         // Try auto re-dispatch
         tryAutoDispatch(order);
@@ -292,7 +314,7 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             throw new BusinessException("No worker assigned to transfer from");
         }
 
-        assertStatus(order, OrderStatus.ACCEPTED, OrderStatus.VISITING);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.TRANSFERRED.getCode());
 
         User targetWorker = userMapper.selectById(request.getTargetWorkerId());
         if (targetWorker == null || !UserRole.WORKER.getCode().equals(targetWorker.getRole())) {
@@ -305,6 +327,10 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
 
         String fromStatus = order.getStatus();
 
+        // Clear old timeout keys before transfer
+        clearAllTimeoutKeys(orderId);
+        clearProcessedMarkers(orderId);
+
         // Record the transfer: first set TRANSFERRED, then re-dispatch
         order.setStatus(OrderStatus.TRANSFERRED.getCode());
         order.setPreviousStatus(fromStatus);
@@ -313,6 +339,11 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         recordProgress(orderId, fromStatus, OrderStatus.TRANSFERRED.getCode(),
                 currentWorkerId, UserRole.WORKER.getCode(),
                 "Transferred to " + targetWorker.getRealName() + ": " + request.getReason());
+
+        auditService.log(orderId, "TRANSFER_ORDER", currentWorkerId, UserRole.WORKER.getCode(),
+                Map.of("status", fromStatus, "fromWorker", currentWorkerId),
+                Map.of("status", OrderStatus.TRANSFERRED.getCode(),
+                        "targetWorker", targetWorker.getRealName()), null);
 
         // Dispatch to new worker
         doDispatch(order, targetWorker, DispatchType.TRANSFER, request.getReason(), currentWorkerId);
@@ -341,6 +372,10 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
 
         recordProgress(orderId, fromStatus, OrderStatus.VISITING.getCode(),
                 workerId, UserRole.WORKER.getCode(), "Worker arrived on-site");
+
+        auditService.log(orderId, "VISIT_ORDER", workerId, UserRole.WORKER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.VISITING.getCode()), null);
     }
 
     @Override
@@ -348,17 +383,25 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void suspendOrder(Long orderId, SuspendRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.ACCEPTED, OrderStatus.VISITING);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.SUSPENDED.getCode());
 
         String fromStatus = order.getStatus();
         order.setPreviousStatus(fromStatus);
         order.setStatus(OrderStatus.SUSPENDED.getCode());
         order.setSuspendReason(request.getReason());
+        order.setSuspendedAt(LocalDateTime.now());
         orderMapper.updateById(order);
+
+        // Clear all timeout keys — suspended orders must not trigger escalation
+        clearAllTimeoutKeys(orderId);
 
         recordProgress(orderId, fromStatus, OrderStatus.SUSPENDED.getCode(),
                 order.getAssignedWorkerId(), UserRole.WORKER.getCode(),
                 "Suspended: " + request.getReason());
+
+        auditService.log(orderId, "SUSPEND_ORDER", order.getAssignedWorkerId(), UserRole.WORKER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.SUSPENDED.getCode(), "reason", request.getReason()), null);
     }
 
     @Override
@@ -366,18 +409,47 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void resumeOrder(Long orderId, Long workerId) {
         RepairOrder order = getById(orderId);
         assertWorkerOwnership(order, workerId);
-        assertStatus(order, OrderStatus.SUSPENDED);
-
         String resumeTo = order.getPreviousStatus() != null
                 ? order.getPreviousStatus() : OrderStatus.ACCEPTED.getCode();
+        stateMachine.validateTransition(order.getStatus(), resumeTo);
+
+        // Calculate pause duration and adjust SLA timestamps
+        LocalDateTime suspendedAt = order.getSuspendedAt();
+        if (suspendedAt != null) {
+            java.time.Duration pauseDuration = java.time.Duration.between(suspendedAt, LocalDateTime.now());
+
+            // Shift the relevant timestamp forward by pause duration to freeze SLA during suspension
+            if (OrderStatus.VISITING.getCode().equals(resumeTo) && order.getVisitAt() != null) {
+                order.setVisitAt(order.getVisitAt().plus(pauseDuration));
+                // Re-set complete timeout with adjusted deadline
+                LocalDateTime newDeadline = order.getVisitAt().plusHours(48);
+                redisTemplate.opsForValue().set(
+                        "timeout:complete:" + orderId,
+                        newDeadline.toString(),
+                        java.time.Duration.ofHours(49));
+            } else if (OrderStatus.ACCEPTED.getCode().equals(resumeTo) && order.getAcceptedAt() != null) {
+                order.setAcceptedAt(order.getAcceptedAt().plus(pauseDuration));
+                // Re-set visit timeout with adjusted deadline
+                LocalDateTime newDeadline = order.getAcceptedAt().plusHours(4);
+                redisTemplate.opsForValue().set(
+                        "timeout:visit:" + orderId,
+                        newDeadline.toString(),
+                        java.time.Duration.ofHours(5));
+            }
+        }
 
         order.setStatus(resumeTo);
         order.setPreviousStatus(null);
         order.setSuspendReason(null);
+        order.setSuspendedAt(null);
         orderMapper.updateById(order);
 
         recordProgress(orderId, OrderStatus.SUSPENDED.getCode(), resumeTo,
                 workerId, UserRole.WORKER.getCode(), "Order resumed");
+
+        auditService.log(orderId, "RESUME_ORDER", workerId, UserRole.WORKER.getCode(),
+                Map.of("status", OrderStatus.SUSPENDED.getCode()),
+                Map.of("status", resumeTo), null);
     }
 
     @Override
@@ -385,7 +457,7 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void completeOrder(Long orderId, CompleteRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.VISITING, OrderStatus.REWORKING);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.COMPLETED.getCode());
 
         Long workerId = order.getAssignedWorkerId();
         String fromStatus = order.getStatus();
@@ -396,6 +468,20 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
 
         // Clear complete timeout
         redisTemplate.delete("timeout:complete:" + orderId);
+
+        // If completing from REWORKING, mark the latest ReworkOrder as completed
+        if (OrderStatus.REWORKING.getCode().equals(fromStatus)) {
+            ReworkOrder latestRework = reworkOrderMapper.selectOne(
+                    new LambdaQueryWrapper<ReworkOrder>()
+                            .eq(ReworkOrder::getOrderId, orderId)
+                            .orderByDesc(ReworkOrder::getCreatedAt)
+                            .last("LIMIT 1"));
+            if (latestRework != null) {
+                latestRework.setStatus("COMPLETED");
+                latestRework.setCompletedAt(LocalDateTime.now());
+                reworkOrderMapper.updateById(latestRework);
+            }
+        }
 
         recordProgress(orderId, fromStatus, OrderStatus.COMPLETED.getCode(),
                 workerId, UserRole.WORKER.getCode(),
@@ -427,7 +513,7 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void reviewOrder(Long orderId, ReviewRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.COMPLETED);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.REVIEWED.getCode());
 
         Long ownerId = order.getOwnerId();
 
@@ -447,12 +533,17 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         reviewMapper.insert(review);
 
         // Update order status
+        String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.REVIEWED.getCode());
         orderMapper.updateById(order);
 
-        recordProgress(orderId, OrderStatus.COMPLETED.getCode(), OrderStatus.REVIEWED.getCode(),
+        recordProgress(orderId, fromStatus, OrderStatus.REVIEWED.getCode(),
                 ownerId, UserRole.OWNER.getCode(),
                 "Reviewed with rating: " + request.getRating());
+
+        auditService.log(orderId, "REVIEW_ORDER", ownerId, UserRole.OWNER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.REVIEWED.getCode(), "rating", request.getRating()), null);
     }
 
     @Override
@@ -460,9 +551,12 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void requestRework(Long orderId, ReworkRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.COMPLETED);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.REWORKING.getCode());
 
         Long ownerId = order.getOwnerId();
+
+        // Increment repair round for a fresh cycle
+        int newRepairRound = (order.getRepairRound() != null ? order.getRepairRound() : 1) + 1;
 
         // Create rework order
         ReworkOrder rework = new ReworkOrder();
@@ -475,18 +569,27 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         rework.setRequesterId(ownerId);
         reworkOrderMapper.insert(rework);
 
-        // Update main order to REWORKING
+        // Update main order to REWORKING with new repair round
         String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.REWORKING.getCode());
+        order.setRepairRound(newRepairRound);
+        // Reset downstream timestamps for fresh cycle
+        order.setCompletedAt(null);
+        order.setVisitAt(null);
         orderMapper.updateById(order);
+
+        // Clear old timeout keys and processed markers so new round can trigger fresh timeouts
+        clearAllTimeoutKeys(orderId);
+        clearProcessedMarkers(orderId);
 
         recordProgress(orderId, fromStatus, OrderStatus.REWORKING.getCode(),
                 ownerId, UserRole.OWNER.getCode(),
                 "Rework requested: " + request.getReason());
 
         auditService.log(orderId, "REQUEST_REWORK", ownerId, UserRole.OWNER.getCode(),
-                Map.of("status", fromStatus),
-                Map.of("status", OrderStatus.REWORKING.getCode(), "reworkNo", rework.getReworkNo()), null);
+                Map.of("status", fromStatus, "repairRound", newRepairRound - 1),
+                Map.of("status", OrderStatus.REWORKING.getCode(), "reworkNo", rework.getReworkNo(),
+                        "repairRound", newRepairRound), null);
     }
 
     @Override
@@ -497,13 +600,18 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         if (!order.getOwnerId().equals(ownerId)) {
             throw new BusinessException(403, "Only the order owner can confirm");
         }
-        assertStatus(order, OrderStatus.COMPLETED);
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.REVIEWED.getCode());
 
+        String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.REVIEWED.getCode());
         orderMapper.updateById(order);
 
-        recordProgress(orderId, OrderStatus.COMPLETED.getCode(), OrderStatus.REVIEWED.getCode(),
+        recordProgress(orderId, fromStatus, OrderStatus.REVIEWED.getCode(),
                 ownerId, UserRole.OWNER.getCode(), "Owner confirmed completion");
+
+        auditService.log(orderId, "CONFIRM_ORDER", ownerId, UserRole.OWNER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.REVIEWED.getCode()), null);
     }
 
     @Override
@@ -515,18 +623,20 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             throw new BusinessException(403, "Only the order owner can cancel");
         }
 
-        // Can only cancel if not yet being worked on
-        OrderStatus status = OrderStatus.valueOf(order.getStatus());
-        if (status.isActive()) {
-            throw new BusinessException("Cannot cancel an order that is being processed");
-        }
+        stateMachine.validateTransition(order.getStatus(), OrderStatus.CANCELLED.getCode());
 
         String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.CANCELLED.getCode());
         orderMapper.updateById(order);
 
+        clearAllTimeoutKeys(orderId);
+
         recordProgress(orderId, fromStatus, OrderStatus.CANCELLED.getCode(),
                 ownerId, UserRole.OWNER.getCode(), "Order cancelled by owner");
+
+        auditService.log(orderId, "CANCEL_ORDER", ownerId, UserRole.OWNER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.CANCELLED.getCode()), null);
     }
 
     // ==========================================================================
@@ -540,11 +650,19 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         assertNotNull(order);
 
         String fromStatus = order.getStatus();
+        stateMachine.validateTransition(fromStatus, OrderStatus.CLOSED.getCode());
+
         order.setStatus(OrderStatus.CLOSED.getCode());
         orderMapper.updateById(order);
 
+        clearAllTimeoutKeys(orderId);
+
         recordProgress(orderId, fromStatus, OrderStatus.CLOSED.getCode(),
                 0L, UserRole.ADMIN.getCode(), "Closed by admin: " + reason);
+
+        auditService.log(orderId, "CLOSE_ORDER", 0L, UserRole.ADMIN.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.CLOSED.getCode(), "reason", reason), null);
     }
 
     @Override
@@ -744,6 +862,18 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         assertNotNull(order);
         if (!workerId.equals(order.getAssignedWorkerId())) {
             throw new BusinessException(403, "You are not the assigned worker for this order");
+        }
+    }
+
+    private void clearAllTimeoutKeys(Long orderId) {
+        redisTemplate.delete("timeout:accept:" + orderId);
+        redisTemplate.delete("timeout:visit:" + orderId);
+        redisTemplate.delete("timeout:complete:" + orderId);
+    }
+
+    private void clearProcessedMarkers(Long orderId) {
+        for (TimeoutType type : TimeoutType.values()) {
+            redisTemplate.delete("timeout:processed:" + type.getCode() + ":" + orderId);
         }
     }
 }
