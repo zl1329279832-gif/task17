@@ -1,0 +1,32 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+mybatis-plus:
+  global-config:
+    db-config:
+      id-type: auto
+
+jwt:
+  secret: test-secret-key-for-jwt-signing-repair-system-testing
+  expiration: 86400000
+  refresh-expiration: 604800000
+
+repair:
+  timeout:
+    accept-minutes: 30
+    complete-hours: 48
+    escalation-delay: 15
+  duplicate:
+    window-hours: 24
+  upload:
+    base-path: ./test-uploads
+    allowed-types: jpg,jpeg,png
+    max-size: 10485760

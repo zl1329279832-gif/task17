@@ -18,7 +18,7 @@ import java.util.*;
  *   SUSPENDED    → ACCEPTED, VISITING (resume to previous)
  *   TRANSFERRED  → DISPATCHED (re-dispatch to new worker)
  *   COMPLETED    → REVIEWED, REWORKING
- *   REWORKING    → VISITING, COMPLETED
+ *   REWORKING    → VISITING, COMPLETED, SUSPENDED
  *   REVIEWED     → (terminal)
  *   CLOSED       → (terminal)
  *   CANCELLED    → (terminal)
@@ -56,6 +56,7 @@ public class OrderStateMachine {
 
         allow(OrderStatus.REWORKING,   OrderStatus.VISITING);
         allow(OrderStatus.REWORKING,   OrderStatus.COMPLETED);
+        allow(OrderStatus.REWORKING,   OrderStatus.SUSPENDED);
 
         // Admin can close from any non-terminal state
         allow(OrderStatus.PENDING,     OrderStatus.CLOSED);

@@ -48,6 +48,7 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     private final DispatchStrategy dispatchStrategy;
     private final OrderStateMachine stateMachine;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final TimeoutEscalationMapper timeoutEscalationMapper;
 
     @Value("${repair.duplicate.window-hours:24}")
     private int duplicateWindowHours;
@@ -189,6 +190,11 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             String fromStatus = order.getStatus();
             int currentLoad = orderMapper.countActiveOrders(worker.getId());
 
+            // Clean up previous dispatch round if re-dispatching
+            if (order.getCurrentDispatchId() != null) {
+                invalidatePreviousDispatch(order);
+            }
+
             // Update order
             order.setAssignedWorkerId(worker.getId());
             if (order.getOriginalWorkerId() == null) {
@@ -196,9 +202,8 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             }
             order.setStatus(OrderStatus.DISPATCHED.getCode());
             order.setAssignedAt(LocalDateTime.now());
-            orderMapper.updateById(order);
 
-            // Record dispatch
+            // Create new dispatch record with active=1
             DispatchRecord record = new DispatchRecord();
             record.setOrderId(order.getId());
             record.setWorkerId(worker.getId());
@@ -206,7 +211,12 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
             record.setFromWorkerId(fromWorkerId);
             record.setReason(reason);
             record.setLoadBefore(currentLoad);
+            record.setActive(1);
             dispatchRecordMapper.insert(record);
+
+            // Link order to this dispatch round
+            order.setCurrentDispatchId(record.getId());
+            orderMapper.updateById(order);
 
             // Record progress
             recordProgress(order.getId(), fromStatus, OrderStatus.DISPATCHED.getCode(),
@@ -220,11 +230,51 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
 
             auditService.log(order.getId(), "DISPATCH_ORDER", worker.getId(), type.getCode(),
                     Map.of("status", fromStatus),
-                    Map.of("status", OrderStatus.DISPATCHED.getCode(), "worker", worker.getRealName()),
+                    Map.of("status", OrderStatus.DISPATCHED.getCode(),
+                           "worker", worker.getRealName()),
                     null);
         } finally {
             redisTemplate.delete(lockKey);
         }
+    }
+
+    /**
+     * Invalidate timeout state from a previous dispatch round.
+     * Called when re-dispatching (manual dispatch, transfer, reject+re-dispatch).
+     */
+    private void invalidatePreviousDispatch(RepairOrder order) {
+        Long oldDispatchId = order.getCurrentDispatchId();
+
+        // 1. Deactivate old dispatch record
+        DispatchRecord oldRecord = dispatchRecordMapper.selectById(oldDispatchId);
+        if (oldRecord != null) {
+            oldRecord.setActive(0);
+            dispatchRecordMapper.updateById(oldRecord);
+        }
+
+        // 2. Mark unhandled escalation records for old dispatch as handled
+        List<TimeoutEscalation> oldEscalations = timeoutEscalationMapper.selectList(
+                new LambdaQueryWrapper<TimeoutEscalation>()
+                        .eq(TimeoutEscalation::getOrderId, order.getId())
+                        .eq(TimeoutEscalation::getDispatchId, oldDispatchId)
+                        .eq(TimeoutEscalation::getHandled, 0));
+        for (TimeoutEscalation esc : oldEscalations) {
+            esc.setHandled(1);
+            esc.setHandledAt(LocalDateTime.now());
+            esc.setHandleRemark("Invalidated by re-dispatch (new dispatch round)");
+            timeoutEscalationMapper.updateById(esc);
+        }
+
+        // 3. Clear all timeout Redis keys (both processed markers and deadline keys)
+        redisTemplate.delete("timeout:processed:ACCEPT_TIMEOUT:" + order.getId());
+        redisTemplate.delete("timeout:processed:VISIT_TIMEOUT:" + order.getId());
+        redisTemplate.delete("timeout:processed:COMPLETE_TIMEOUT:" + order.getId());
+        redisTemplate.delete("timeout:accept:" + order.getId());
+        redisTemplate.delete("timeout:visit:" + order.getId());
+        redisTemplate.delete("timeout:complete:" + order.getId());
+
+        log.info("Invalidated previous dispatch round: orderId={}, oldDispatchId={}",
+                order.getId(), oldDispatchId);
     }
 
     // ==========================================================================
@@ -348,17 +398,34 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     public void suspendOrder(Long orderId, SuspendRequest request) {
         RepairOrder order = getById(orderId);
         assertNotNull(order);
-        assertStatus(order, OrderStatus.ACCEPTED, OrderStatus.VISITING);
+        assertStatus(order, OrderStatus.ACCEPTED, OrderStatus.VISITING, OrderStatus.REWORKING);
 
         String fromStatus = order.getStatus();
         order.setPreviousStatus(fromStatus);
         order.setStatus(OrderStatus.SUSPENDED.getCode());
         order.setSuspendReason(request.getReason());
+        order.setSuspendedAt(LocalDateTime.now());
         orderMapper.updateById(order);
+
+        // Clear all active timeout Redis keys so timeout task won't fire
+        redisTemplate.delete("timeout:accept:" + orderId);
+        redisTemplate.delete("timeout:visit:" + orderId);
+        redisTemplate.delete("timeout:complete:" + orderId);
+        // Also clear processed markers so timeout can re-fire correctly after resume
+        redisTemplate.delete("timeout:processed:ACCEPT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:VISIT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:COMPLETE_TIMEOUT:" + orderId);
 
         recordProgress(orderId, fromStatus, OrderStatus.SUSPENDED.getCode(),
                 order.getAssignedWorkerId(), UserRole.WORKER.getCode(),
                 "Suspended: " + request.getReason());
+
+        auditService.log(orderId, "SUSPEND_ORDER", order.getAssignedWorkerId(),
+                UserRole.WORKER.getCode(),
+                Map.of("status", fromStatus),
+                Map.of("status", OrderStatus.SUSPENDED.getCode(),
+                       "reason", request.getReason()),
+                null);
     }
 
     @Override
@@ -371,13 +438,56 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         String resumeTo = order.getPreviousStatus() != null
                 ? order.getPreviousStatus() : OrderStatus.ACCEPTED.getCode();
 
+        // Calculate pause duration and adjust SLA timestamps
+        LocalDateTime suspendedAt = order.getSuspendedAt();
+        long pauseSeconds = 0;
+        if (suspendedAt != null) {
+            pauseSeconds = java.time.Duration.between(suspendedAt, LocalDateTime.now()).getSeconds();
+            int totalSuspended = (order.getTotalSuspendedSeconds() != null
+                    ? order.getTotalSuspendedSeconds() : 0) + (int) pauseSeconds;
+            order.setTotalSuspendedSeconds(totalSuspended);
+
+            // Adjust the relevant timestamp based on the state we're resuming to
+            if (OrderStatus.ACCEPTED.getCode().equals(resumeTo)) {
+                if (order.getAcceptedAt() != null) {
+                    order.setAcceptedAt(order.getAcceptedAt().plusSeconds(pauseSeconds));
+                }
+            } else if (OrderStatus.VISITING.getCode().equals(resumeTo)) {
+                if (order.getVisitAt() != null) {
+                    order.setVisitAt(order.getVisitAt().plusSeconds(pauseSeconds));
+                }
+            }
+        }
+
         order.setStatus(resumeTo);
         order.setPreviousStatus(null);
         order.setSuspendReason(null);
+        order.setSuspendedAt(null);
         orderMapper.updateById(order);
 
+        // Re-establish Redis timeout keys with adjusted deadlines
+        if (OrderStatus.ACCEPTED.getCode().equals(resumeTo) && order.getAcceptedAt() != null) {
+            LocalDateTime visitDeadline = order.getAcceptedAt().plusHours(4);
+            redisTemplate.opsForValue().set(
+                    "timeout:visit:" + orderId,
+                    visitDeadline.toString(),
+                    java.time.Duration.ofHours(5));
+        } else if (OrderStatus.VISITING.getCode().equals(resumeTo) && order.getVisitAt() != null) {
+            LocalDateTime completeDeadline = order.getVisitAt().plusHours(48);
+            redisTemplate.opsForValue().set(
+                    "timeout:complete:" + orderId,
+                    completeDeadline.toString(),
+                    java.time.Duration.ofHours(49));
+        }
+
         recordProgress(orderId, OrderStatus.SUSPENDED.getCode(), resumeTo,
-                workerId, UserRole.WORKER.getCode(), "Order resumed");
+                workerId, UserRole.WORKER.getCode(),
+                String.format("Order resumed (paused %d sec). SLA deadline adjusted.", pauseSeconds));
+
+        auditService.log(orderId, "RESUME_ORDER", workerId, UserRole.WORKER.getCode(),
+                Map.of("status", OrderStatus.SUSPENDED.getCode()),
+                Map.of("status", resumeTo, "pauseSeconds", pauseSeconds),
+                null);
     }
 
     @Override
@@ -475,10 +585,30 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         rework.setRequesterId(ownerId);
         reworkOrderMapper.insert(rework);
 
-        // Update main order to REWORKING
+        // Invalidate old review (soft delete via @TableLogic)
+        Review existingReview = reviewMapper.selectOne(
+                new LambdaQueryWrapper<Review>()
+                        .eq(Review::getOrderId, orderId));
+        if (existingReview != null) {
+            existingReview.setDeleted(1);
+            reviewMapper.updateById(existingReview);
+        }
+
+        // Update main order to REWORKING with timestamp cleanup
         String fromStatus = order.getStatus();
         order.setStatus(OrderStatus.REWORKING.getCode());
+        order.setVisitAt(null);
+        order.setCompletedAt(null);
+        order.setCurrentDispatchId(null);
         orderMapper.updateById(order);
+
+        // Clear all timeout Redis keys and processed markers
+        redisTemplate.delete("timeout:processed:ACCEPT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:VISIT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:COMPLETE_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:accept:" + orderId);
+        redisTemplate.delete("timeout:visit:" + orderId);
+        redisTemplate.delete("timeout:complete:" + orderId);
 
         recordProgress(orderId, fromStatus, OrderStatus.REWORKING.getCode(),
                 ownerId, UserRole.OWNER.getCode(),
@@ -486,7 +616,9 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
 
         auditService.log(orderId, "REQUEST_REWORK", ownerId, UserRole.OWNER.getCode(),
                 Map.of("status", fromStatus),
-                Map.of("status", OrderStatus.REWORKING.getCode(), "reworkNo", rework.getReworkNo()), null);
+                Map.of("status", OrderStatus.REWORKING.getCode(),
+                       "reworkNo", rework.getReworkNo()),
+                null);
     }
 
     @Override
@@ -629,6 +761,9 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         vo.setAssignedWorkerId(order.getAssignedWorkerId());
         vo.setStatus(order.getStatus());
         vo.setSuspendReason(order.getSuspendReason());
+        vo.setSuspendedAt(order.getSuspendedAt());
+        vo.setTotalSuspendedSeconds(order.getTotalSuspendedSeconds());
+        vo.setCurrentDispatchId(order.getCurrentDispatchId());
         vo.setSubmittedAt(order.getSubmittedAt());
         vo.setAssignedAt(order.getAssignedAt());
         vo.setAcceptedAt(order.getAcceptedAt());

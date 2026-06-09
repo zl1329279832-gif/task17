@@ -51,6 +51,15 @@ public class RepairOrder {
 
     private String suspendReason;
 
+    /** ID of the currently active dispatch record (dispatch round tracker) */
+    private Long currentDispatchId;
+
+    /** When the order was suspended (null when not suspended) */
+    private LocalDateTime suspendedAt;
+
+    /** Cumulative seconds the order has been suspended */
+    private Integer totalSuspendedSeconds;
+
     // ---- Timestamps ----
     private LocalDateTime submittedAt;
 

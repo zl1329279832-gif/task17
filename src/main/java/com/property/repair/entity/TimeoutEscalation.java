@@ -14,6 +14,9 @@ public class TimeoutEscalation {
 
     private Long orderId;
 
+    /** The dispatch record ID that was active when this escalation was created */
+    private Long dispatchId;
+
     /** ACCEPT_TIMEOUT, VISIT_TIMEOUT, COMPLETE_TIMEOUT */
     private String timeoutType;
 

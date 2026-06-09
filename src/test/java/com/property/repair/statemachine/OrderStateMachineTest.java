@@ -57,6 +57,7 @@ class OrderStateMachineTest {
             Arguments.of(OrderStatus.COMPLETED, OrderStatus.REWORKING),
             Arguments.of(OrderStatus.REWORKING, OrderStatus.VISITING),
             Arguments.of(OrderStatus.REWORKING, OrderStatus.COMPLETED),
+            Arguments.of(OrderStatus.REWORKING, OrderStatus.SUSPENDED),
 
             // Cancel
             Arguments.of(OrderStatus.PENDING, OrderStatus.CANCELLED),

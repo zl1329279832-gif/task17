@@ -41,6 +41,9 @@ public class RepairOrderVO {
     private String status;
     private String statusName;
     private String suspendReason;
+    private LocalDateTime suspendedAt;
+    private Integer totalSuspendedSeconds;
+    private Long currentDispatchId;
 
     // Timestamps
     private LocalDateTime submittedAt;

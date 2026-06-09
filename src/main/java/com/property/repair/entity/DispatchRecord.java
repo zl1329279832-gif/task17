@@ -30,6 +30,9 @@ public class DispatchRecord {
     /** Auto-dispatch match score */
     private BigDecimal score;
 
+    /** 1=active dispatch round, 0=superseded by re-dispatch */
+    private Integer active;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 }

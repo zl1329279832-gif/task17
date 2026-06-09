@@ -56,7 +56,8 @@ public class TimeoutEscalationTask {
         List<RepairOrder> dispatchedOrders = orderMapper.selectList(
                 new LambdaQueryWrapper<RepairOrder>()
                         .eq(RepairOrder::getStatus, OrderStatus.DISPATCHED.getCode())
-                        .isNotNull(RepairOrder::getAssignedAt));
+                        .isNotNull(RepairOrder::getAssignedAt)
+                        .isNull(RepairOrder::getSuspendedAt));
 
         for (RepairOrder order : dispatchedOrders) {
             if (isAlreadyProcessed(order.getId(), TimeoutType.ACCEPT_TIMEOUT)) {
@@ -83,7 +84,8 @@ public class TimeoutEscalationTask {
         List<RepairOrder> acceptedOrders = orderMapper.selectList(
                 new LambdaQueryWrapper<RepairOrder>()
                         .eq(RepairOrder::getStatus, OrderStatus.ACCEPTED.getCode())
-                        .isNotNull(RepairOrder::getAcceptedAt));
+                        .isNotNull(RepairOrder::getAcceptedAt)
+                        .isNull(RepairOrder::getSuspendedAt));
 
         for (RepairOrder order : acceptedOrders) {
             if (isAlreadyProcessed(order.getId(), TimeoutType.VISIT_TIMEOUT)) {
@@ -110,7 +112,8 @@ public class TimeoutEscalationTask {
         List<RepairOrder> visitingOrders = orderMapper.selectList(
                 new LambdaQueryWrapper<RepairOrder>()
                         .eq(RepairOrder::getStatus, OrderStatus.VISITING.getCode())
-                        .isNotNull(RepairOrder::getVisitAt));
+                        .isNotNull(RepairOrder::getVisitAt)
+                        .isNull(RepairOrder::getSuspendedAt));
 
         for (RepairOrder order : visitingOrders) {
             if (isAlreadyProcessed(order.getId(), TimeoutType.COMPLETE_TIMEOUT)) {
@@ -143,15 +146,35 @@ public class TimeoutEscalationTask {
 
         for (TimeoutEscalation esc : unhandled) {
             RepairOrder order = orderMapper.selectById(esc.getOrderId());
-            if (order != null && !order.getStatus().equals(OrderStatus.REVIEWED.getCode())
-                    && !order.getStatus().equals(OrderStatus.CLOSED.getCode())) {
-                // Create second-level escalation to admin
-                createEscalation(order,
-                        TimeoutType.valueOf(esc.getTimeoutType()),
-                        esc.getDeadline(), 2);
-                log.info("Second-level escalation: order={}, type={}",
-                        order.getOrderNo(), esc.getTimeoutType());
+            if (order == null) continue;
+
+            // Skip terminal orders
+            if (order.getStatus().equals(OrderStatus.REVIEWED.getCode())
+                    || order.getStatus().equals(OrderStatus.CLOSED.getCode())) {
+                continue;
             }
+
+            // Skip suspended orders
+            if (order.getStatus().equals(OrderStatus.SUSPENDED.getCode())) {
+                continue;
+            }
+
+            // Skip if escalation belongs to a superseded dispatch round
+            if (esc.getDispatchId() != null
+                    && !esc.getDispatchId().equals(order.getCurrentDispatchId())) {
+                esc.setHandled(1);
+                esc.setHandledAt(LocalDateTime.now());
+                esc.setHandleRemark("Skipped: superseded dispatch round");
+                escalationMapper.updateById(esc);
+                continue;
+            }
+
+            // Create second-level escalation to admin
+            createEscalation(order,
+                    TimeoutType.valueOf(esc.getTimeoutType()),
+                    esc.getDeadline(), 2);
+            log.info("Second-level escalation: order={}, type={}",
+                    order.getOrderNo(), esc.getTimeoutType());
         }
     }
 
@@ -164,6 +187,7 @@ public class TimeoutEscalationTask {
 
         TimeoutEscalation escalation = new TimeoutEscalation();
         escalation.setOrderId(order.getId());
+        escalation.setDispatchId(order.getCurrentDispatchId());
         escalation.setTimeoutType(type.getCode());
         escalation.setDeadline(deadline);
         escalation.setEscalatedTo(supervisorId);
@@ -195,18 +219,26 @@ public class TimeoutEscalationTask {
     /**
      * Check if this order+timeoutType has already been processed.
      * Uses both database and Redis to prevent duplicates.
+     * Dispatch-round aware: only counts escalations for the current dispatch round.
      */
     private boolean isAlreadyProcessed(Long orderId, TimeoutType type) {
-        // Check Redis first (fast)
+        // Check Redis first (fast) — keys are cleared on re-dispatch/rework/suspend
         String redisKey = PROCESSED_KEY_PREFIX + type.getCode() + ":" + orderId;
         Boolean exists = redisTemplate.hasKey(redisKey);
         if (exists != null && exists) return true;
 
-        // Check database
-        long count = escalationMapper.selectCount(
-                new LambdaQueryWrapper<TimeoutEscalation>()
-                        .eq(TimeoutEscalation::getOrderId, orderId)
-                        .eq(TimeoutEscalation::getTimeoutType, type.getCode()));
+        // Check database — only count escalations for the CURRENT dispatch round
+        RepairOrder order = orderMapper.selectById(orderId);
+        if (order == null) return true;
+
+        Long currentDispatchId = order.getCurrentDispatchId();
+        LambdaQueryWrapper<TimeoutEscalation> wrapper = new LambdaQueryWrapper<TimeoutEscalation>()
+                .eq(TimeoutEscalation::getOrderId, orderId)
+                .eq(TimeoutEscalation::getTimeoutType, type.getCode());
+        if (currentDispatchId != null) {
+            wrapper.eq(TimeoutEscalation::getDispatchId, currentDispatchId);
+        }
+        long count = escalationMapper.selectCount(wrapper);
         return count > 0;
     }
 
