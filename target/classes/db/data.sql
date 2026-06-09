@@ -44,3 +44,29 @@ INSERT INTO `sys_worker_skill` (`worker_id`, `problem_type`, `proficiency`) VALU
 (7, 'FACILITY',   4),
 (7, 'CIVIL',      4),
 (7, 'PLUMBING',   2);
+
+-- Spare Parts
+INSERT INTO `spare_part` (`id`, `part_no`, `name`, `specification`, `unit`, `problem_type`, `is_critical`, `min_stock`) VALUES
+(1,  'SP-PLB-001', 'Faucet Cartridge',      'Universal 35mm',        'pcs', 'PLUMBING',   1, 10),
+(2,  'SP-PLB-002', 'PVC Pipe 50mm',         '50mm x 1m',             'm',   'PLUMBING',   1, 20),
+(3,  'SP-PLB-003', 'Pipe Sealant Tape',     'PTFE 12mm x 10m',       'roll','PLUMBING',   0, 30),
+(4,  'SP-PLB-004', 'Drain Strainer',        'Stainless Steel 80mm',  'pcs', 'PLUMBING',   0, 15),
+(5,  'SP-ELE-001', 'Circuit Breaker 20A',   'DZ47 1P 20A',           'pcs', 'ELECTRICAL', 1, 8),
+(6,  'SP-ELE-002', 'LED Light Panel',       '600x600mm 48W',         'pcs', 'ELECTRICAL', 0, 10),
+(7,  'SP-ELE-003', 'Electrical Wire 2.5mm', 'BV 2.5mm² red',         'm',   'ELECTRICAL', 1, 50),
+(8,  'SP-CIV-001', 'Wall Patch Compound',   '5kg bucket',            'bucket','CIVIL',    0, 10),
+(9,  'SP-CIV-002', 'Waterproof Membrane',   '1.5mm x 1m roll',       'm',   'CIVIL',      1, 15),
+(10, 'SP-FAC-001', 'Door Lock Cylinder',    'Universal Euro Profile', 'pcs', 'FACILITY',   1, 6),
+(11, 'SP-FAC-002', 'Window Handle',         'Universal Espag',       'pcs', 'FACILITY',   0, 10),
+(12, 'SP-FAC-003', 'Elevator Button Panel', 'Standard 16-floor',     'pcs', 'FACILITY',   1, 2);
+
+-- Spare Part Inventory (per community)
+INSERT INTO `spare_part_inventory` (`part_id`, `community_id`, `quantity`, `reserved_quantity`) VALUES
+-- Sunshine Garden (community 1)
+(1,  1, 15, 0), (2,  1, 30, 0), (3,  1, 50, 0), (4,  1, 20, 0),
+(5,  1, 10, 0), (6,  1, 12, 0), (7,  1, 80, 0), (8,  1, 8,  0),
+(9,  1, 20, 0), (10, 1, 5,  0), (11, 1, 8,  0), (12, 1, 1,  0),
+-- Green Valley Estate (community 2)
+(1,  2, 10, 0), (2,  2, 25, 0), (3,  2, 40, 0), (4,  2, 15, 0),
+(5,  2, 8,  0), (6,  2, 10, 0), (7,  2, 60, 0), (8,  2, 6,  0),
+(9,  2, 15, 0), (10, 2, 4,  0), (11, 2, 6,  0), (12, 2, 0,  0);

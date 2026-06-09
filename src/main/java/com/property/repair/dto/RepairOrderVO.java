@@ -62,6 +62,7 @@ public class RepairOrderVO {
     private List<ProgressVO> progressTimeline;
     private ReviewVO review;
     private List<ReworkOrderVO> reworkOrders;
+    private List<RequisitionVO> requisitions;
 
     @Data
     public static class AttachmentVO {
@@ -108,5 +109,26 @@ public class RepairOrderVO {
         private String assignedWorkerName;
         private LocalDateTime completedAt;
         private LocalDateTime createdAt;
+    }
+
+    @Data
+    public static class RequisitionVO {
+        private Long id;
+        private String requisitionNo;
+        private String status;
+        private Long reworkOrderId;
+        private List<RequisitionItemVO> items;
+        private LocalDateTime createdAt;
+    }
+
+    @Data
+    public static class RequisitionItemVO {
+        private Long partId;
+        private String partName;
+        private String partNo;
+        private Integer requestedQuantity;
+        private Integer issuedQuantity;
+        private Integer consumedQuantity;
+        private Integer returnedQuantity;
     }
 }

@@ -277,3 +277,117 @@ CREATE INDEX `idx_order_status_worker` ON `repair_order` (`status`, `assigned_wo
 CREATE INDEX `idx_progress_order_time` ON `repair_progress` (`order_id`, `created_at`);
 CREATE INDEX `idx_dispatch_active` ON `dispatch_record` (`order_id`, `active`);
 CREATE INDEX `idx_escalation_dispatch` ON `timeout_escalation` (`order_id`, `dispatch_id`, `handled`);
+
+-- ---------------------------------------------------
+-- 13. Spare Part Table
+-- ---------------------------------------------------
+CREATE TABLE `spare_part` (
+    `id`              BIGINT       NOT NULL AUTO_INCREMENT,
+    `part_no`         VARCHAR(64)  NOT NULL COMMENT 'Unique part number',
+    `name`            VARCHAR(128) NOT NULL COMMENT 'Part name',
+    `specification`   VARCHAR(255) DEFAULT NULL COMMENT 'Specification/model',
+    `unit`            VARCHAR(32)  NOT NULL DEFAULT 'pcs' COMMENT 'Unit of measure',
+    `problem_type`    VARCHAR(64)  DEFAULT NULL COMMENT 'Associated repair category',
+    `is_critical`     TINYINT      NOT NULL DEFAULT 0 COMMENT '1=critical part',
+    `min_stock`       INT          NOT NULL DEFAULT 5 COMMENT 'Minimum safe stock level',
+    `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_part_no` (`part_no`),
+    KEY `idx_problem_type` (`problem_type`)
+) ENGINE=InnoDB COMMENT='Spare Part Definitions';
+
+-- ---------------------------------------------------
+-- 14. Spare Part Inventory Table
+-- ---------------------------------------------------
+CREATE TABLE `spare_part_inventory` (
+    `id`              BIGINT       NOT NULL AUTO_INCREMENT,
+    `part_id`         BIGINT       NOT NULL,
+    `community_id`    BIGINT       NOT NULL,
+    `quantity`        INT          NOT NULL DEFAULT 0 COMMENT 'Available quantity',
+    `reserved_quantity` INT        NOT NULL DEFAULT 0 COMMENT 'Reserved for pending requisitions',
+    `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_part_community` (`part_id`, `community_id`),
+    KEY `idx_community` (`community_id`)
+) ENGINE=InnoDB COMMENT='Spare Part Inventory per Community';
+
+-- ---------------------------------------------------
+-- 15. Spare Part Requisition Table
+-- ---------------------------------------------------
+CREATE TABLE `spare_part_requisition` (
+    `id`              BIGINT       NOT NULL AUTO_INCREMENT,
+    `requisition_no`  VARCHAR(64)  NOT NULL,
+    `order_id`        BIGINT       NOT NULL COMMENT 'Related repair order',
+    `worker_id`       BIGINT       NOT NULL COMMENT 'Requesting worker',
+    `rework_order_id` BIGINT       DEFAULT NULL COMMENT 'Related rework order for second requisition',
+    `status`          VARCHAR(32)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/ISSUED/COMPLETED/REJECTED',
+    `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_requisition_no` (`requisition_no`),
+    KEY `idx_order` (`order_id`),
+    KEY `idx_worker` (`worker_id`),
+    KEY `idx_status` (`status`)
+) ENGINE=InnoDB COMMENT='Spare Part Requisition Orders';
+
+-- ---------------------------------------------------
+-- 16. Spare Part Requisition Item Table
+-- ---------------------------------------------------
+CREATE TABLE `spare_part_requisition_item` (
+    `id`                BIGINT     NOT NULL AUTO_INCREMENT,
+    `requisition_id`    BIGINT     NOT NULL,
+    `part_id`           BIGINT     NOT NULL,
+    `requested_quantity` INT       NOT NULL DEFAULT 1,
+    `issued_quantity`   INT        NOT NULL DEFAULT 0,
+    `consumed_quantity` INT        NOT NULL DEFAULT 0,
+    `returned_quantity` INT        NOT NULL DEFAULT 0,
+    PRIMARY KEY (`id`),
+    KEY `idx_requisition` (`requisition_id`),
+    KEY `idx_part` (`part_id`)
+) ENGINE=InnoDB COMMENT='Requisition Line Items';
+
+-- ---------------------------------------------------
+-- 17. Purchase Request Table
+-- ---------------------------------------------------
+CREATE TABLE `purchase_request` (
+    `id`                    BIGINT       NOT NULL AUTO_INCREMENT,
+    `request_no`            VARCHAR(64)  NOT NULL,
+    `part_id`               BIGINT       NOT NULL,
+    `community_id`          BIGINT       NOT NULL,
+    `quantity`              INT          NOT NULL,
+    `status`                VARCHAR(32)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/ORDERED/RECEIVED/CANCELLED',
+    `trigger_requisition_id` BIGINT     DEFAULT NULL COMMENT 'Requisition that triggered this purchase',
+    `trigger_order_id`      BIGINT       DEFAULT NULL COMMENT 'Repair order that triggered this purchase',
+    `received_at`           DATETIME     DEFAULT NULL,
+    `created_at`            DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_request_no` (`request_no`),
+    KEY `idx_part` (`part_id`),
+    KEY `idx_status` (`status`),
+    KEY `idx_community` (`community_id`)
+) ENGINE=InnoDB COMMENT='Spare Part Purchase Requests';
+
+-- ---------------------------------------------------
+-- 18. Spare Part Audit Log Table
+-- ---------------------------------------------------
+CREATE TABLE `spare_part_audit_log` (
+    `id`              BIGINT       NOT NULL AUTO_INCREMENT,
+    `part_id`         BIGINT       DEFAULT NULL,
+    `inventory_id`    BIGINT       DEFAULT NULL,
+    `requisition_id`  BIGINT       DEFAULT NULL,
+    `order_id`        BIGINT       DEFAULT NULL,
+    `action`          VARCHAR(64)  NOT NULL COMMENT 'REQUISITION/ISSUE/CONSUME/RETURN/PURCHASE_IN/STOCK_ADJUST',
+    `quantity_change`  INT         NOT NULL DEFAULT 0 COMMENT 'Positive=in, Negative=out',
+    `before_quantity` INT          DEFAULT NULL,
+    `after_quantity`  INT          DEFAULT NULL,
+    `operator_id`     BIGINT       DEFAULT NULL,
+    `remark`          VARCHAR(500) DEFAULT NULL,
+    `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_part` (`part_id`),
+    KEY `idx_order` (`order_id`),
+    KEY `idx_requisition` (`requisition_id`),
+    KEY `idx_action` (`action`),
+    KEY `idx_created` (`created_at`)
+) ENGINE=InnoDB COMMENT='Spare Part Audit Trail';

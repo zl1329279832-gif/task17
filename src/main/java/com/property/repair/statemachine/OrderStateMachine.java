@@ -58,12 +58,21 @@ public class OrderStateMachine {
         allow(OrderStatus.REWORKING,   OrderStatus.COMPLETED);
         allow(OrderStatus.REWORKING,   OrderStatus.SUSPENDED);
 
+        // Waiting for spare parts
+        allow(OrderStatus.ACCEPTED,      OrderStatus.WAITING_PARTS);
+        allow(OrderStatus.VISITING,      OrderStatus.WAITING_PARTS);
+        allow(OrderStatus.REWORKING,     OrderStatus.WAITING_PARTS);
+        allow(OrderStatus.WAITING_PARTS, OrderStatus.ACCEPTED);       // resume after parts arrive
+        allow(OrderStatus.WAITING_PARTS, OrderStatus.VISITING);       // resume after parts arrive
+        allow(OrderStatus.WAITING_PARTS, OrderStatus.REWORKING);      // resume after parts arrive
+
         // Admin can close from any non-terminal state
         allow(OrderStatus.PENDING,     OrderStatus.CLOSED);
         allow(OrderStatus.DISPATCHED,  OrderStatus.CLOSED);
         allow(OrderStatus.ACCEPTED,    OrderStatus.CLOSED);
         allow(OrderStatus.VISITING,    OrderStatus.CLOSED);
         allow(OrderStatus.SUSPENDED,   OrderStatus.CLOSED);
+        allow(OrderStatus.WAITING_PARTS, OrderStatus.CLOSED);
         allow(OrderStatus.REWORKING,   OrderStatus.CLOSED);
         allow(OrderStatus.COMPLETED,   OrderStatus.CLOSED);
     }

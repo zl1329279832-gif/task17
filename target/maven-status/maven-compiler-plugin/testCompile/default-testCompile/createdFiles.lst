@@ -1,4 +1,5 @@
 com\property\repair\RepairSystemApplicationTests.class
+com\property\repair\service\SparePartServiceTest.class
 com\property\repair\controller\RepairOrderControllerIntegrationTest.class
 com\property\repair\dispatch\DefaultDispatchStrategyTest.class
 com\property\repair\statemachine\OrderStateMachineTest.class

@@ -25,6 +25,7 @@ public enum OrderStatus {
     REVIEWED("REVIEWED", "Owner reviewed, order closed"),
     TRANSFERRED("TRANSFERRED", "Transferred to another worker"),
     SUSPENDED("SUSPENDED", "Temporarily suspended"),
+    WAITING_PARTS("WAITING_PARTS", "Waiting for spare parts"),
     REWORKING("REWORKING", "Rework in progress"),
     CLOSED("CLOSED", "Closed by admin"),
     CANCELLED("CANCELLED", "Cancelled by owner");

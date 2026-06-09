@@ -15,6 +15,7 @@ import com.property.repair.mapper.*;
 import com.property.repair.service.AuditService;
 import com.property.repair.service.DispatchStrategy;
 import com.property.repair.service.RepairOrderService;
+import com.property.repair.service.SparePartService;
 import com.property.repair.statemachine.OrderStateMachine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,6 +50,10 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
     private final OrderStateMachine stateMachine;
     private final RedisTemplate<String, Object> redisTemplate;
     private final TimeoutEscalationMapper timeoutEscalationMapper;
+    private final SparePartService sparePartService;
+    private final SparePartRequisitionMapper sparePartRequisitionMapper;
+    private final SparePartRequisitionItemMapper sparePartRequisitionItemMapper;
+    private final SparePartMapper sparePartMapper;
 
     @Value("${repair.duplicate.window-hours:24}")
     private int duplicateWindowHours;
@@ -507,6 +512,9 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
         // Clear complete timeout
         redisTemplate.delete("timeout:complete:" + orderId);
 
+        // Mark all issued spare parts as consumed
+        sparePartService.consumePartsForOrder(orderId);
+
         recordProgress(orderId, fromStatus, OrderStatus.COMPLETED.getCode(),
                 workerId, UserRole.WORKER.getCode(),
                 "Repair completed: " + request.getRemark());
@@ -855,6 +863,38 @@ public class RepairOrderServiceImpl extends ServiceImpl<RepairOrderMapper, Repai
                 if (w != null) rov.setAssignedWorkerName(w.getRealName());
             }
             return rov;
+        }).collect(Collectors.toList()));
+
+        // Spare part requisitions
+        List<SparePartRequisition> reqList = sparePartRequisitionMapper.selectList(
+                new LambdaQueryWrapper<SparePartRequisition>()
+                        .eq(SparePartRequisition::getOrderId, order.getId())
+                        .orderByDesc(SparePartRequisition::getCreatedAt));
+        vo.setRequisitions(reqList.stream().map(req -> {
+            RepairOrderVO.RequisitionVO rv = new RepairOrderVO.RequisitionVO();
+            rv.setId(req.getId());
+            rv.setRequisitionNo(req.getRequisitionNo());
+            rv.setStatus(req.getStatus());
+            rv.setReworkOrderId(req.getReworkOrderId());
+            rv.setCreatedAt(req.getCreatedAt());
+            List<SparePartRequisitionItem> items = sparePartRequisitionItemMapper.selectList(
+                    new LambdaQueryWrapper<SparePartRequisitionItem>()
+                            .eq(SparePartRequisitionItem::getRequisitionId, req.getId()));
+            rv.setItems(items.stream().map(item -> {
+                RepairOrderVO.RequisitionItemVO iv = new RepairOrderVO.RequisitionItemVO();
+                iv.setPartId(item.getPartId());
+                iv.setRequestedQuantity(item.getRequestedQuantity());
+                iv.setIssuedQuantity(item.getIssuedQuantity());
+                iv.setConsumedQuantity(item.getConsumedQuantity());
+                iv.setReturnedQuantity(item.getReturnedQuantity());
+                SparePart part = sparePartMapper.selectById(item.getPartId());
+                if (part != null) {
+                    iv.setPartName(part.getName());
+                    iv.setPartNo(part.getPartNo());
+                }
+                return iv;
+            }).collect(Collectors.toList()));
+            return rv;
         }).collect(Collectors.toList()));
 
         return vo;

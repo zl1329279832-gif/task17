@@ -59,6 +59,15 @@ class OrderStateMachineTest {
             Arguments.of(OrderStatus.REWORKING, OrderStatus.COMPLETED),
             Arguments.of(OrderStatus.REWORKING, OrderStatus.SUSPENDED),
 
+            // Waiting for parts
+            Arguments.of(OrderStatus.ACCEPTED, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.VISITING, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.REWORKING, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.ACCEPTED),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.VISITING),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.REWORKING),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.CLOSED),
+
             // Cancel
             Arguments.of(OrderStatus.PENDING, OrderStatus.CANCELLED),
 
@@ -97,7 +106,13 @@ class OrderStateMachineTest {
             Arguments.of(OrderStatus.VISITING, OrderStatus.REVIEWED),
 
             // Cannot rework from non-completed states
-            Arguments.of(OrderStatus.VISITING, OrderStatus.REWORKING)
+            Arguments.of(OrderStatus.VISITING, OrderStatus.REWORKING),
+
+            // WAITING_PARTS invalid transitions
+            Arguments.of(OrderStatus.PENDING, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.DISPATCHED, OrderStatus.WAITING_PARTS),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.DISPATCHED),
+            Arguments.of(OrderStatus.WAITING_PARTS, OrderStatus.COMPLETED)
         );
     }
 
