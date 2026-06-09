@@ -1,8 +1,8 @@
 -------------------------------------------------------------------------------
 Test set: com.property.repair.controller.RepairOrderControllerIntegrationTest
 -------------------------------------------------------------------------------
-Tests run: 3, Failures: 1, Errors: 2, Skipped: 0, Time elapsed: 9.382 s <<< FAILURE! -- in com.property.repair.controller.RepairOrderControllerIntegrationTest
-com.property.repair.controller.RepairOrderControllerIntegrationTest.fullLifecycle -- Time elapsed: 1.828 s <<< ERROR!
+Tests run: 3, Failures: 1, Errors: 2, Skipped: 0, Time elapsed: 6.281 s <<< FAILURE! -- in com.property.repair.controller.RepairOrderControllerIntegrationTest
+com.property.repair.controller.RepairOrderControllerIntegrationTest.fullLifecycle -- Time elapsed: 1.100 s <<< ERROR!
 org.springframework.jdbc.BadSqlGrammarException: 
 
 ### Error querying database.  Cause: org.h2.jdbc.JdbcSQLSyntaxErrorException: Table "SYS_USER" not found (this database is empty); SQL statement:
@@ -19,23 +19,23 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:116)
 	at org.mybatis.spring.MyBatisExceptionTranslator.translateExceptionIfPossible(MyBatisExceptionTranslator.java:92)
 	at org.mybatis.spring.SqlSessionTemplate$SqlSessionInterceptor.invoke(SqlSessionTemplate.java:439)
-	at jdk.proxy2/jdk.proxy2.$Proxy98.selectList(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy96.selectList(Unknown Source)
 	at org.mybatis.spring.SqlSessionTemplate.selectList(SqlSessionTemplate.java:224)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperMethod.executeForMany(MybatisMapperMethod.java:164)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperMethod.execute(MybatisMapperMethod.java:77)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$PlainMethodInvoker.invoke(MybatisMapperProxy.java:149)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectList(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectList(Unknown Source)
 	at com.baomidou.mybatisplus.core.mapper.BaseMapper.selectOne(BaseMapper.java:223)
 	at java.base/java.lang.invoke.MethodHandle.invokeWithArguments(MethodHandle.java:732)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$DefaultMethodInvoker.invoke(MybatisMapperProxy.java:163)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectOne(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectOne(Unknown Source)
 	at com.baomidou.mybatisplus.core.mapper.BaseMapper.selectOne(BaseMapper.java:212)
 	at java.base/java.lang.invoke.MethodHandle.invokeWithArguments(MethodHandle.java:732)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$DefaultMethodInvoker.invoke(MybatisMapperProxy.java:163)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectOne(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectOne(Unknown Source)
 	at com.property.repair.security.UserDetailsServiceImpl.loadUserByUsername(UserDetailsServiceImpl.java:20)
 	at com.property.repair.security.JwtAuthenticationFilter.doFilterInternal(JwtAuthenticationFilter.java:38)
 	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
@@ -122,7 +122,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
 	at org.apache.ibatis.logging.jdbc.ConnectionLogger.invoke(ConnectionLogger.java:53)
-	at jdk.proxy3/jdk.proxy3.$Proxy148.prepareStatement(Unknown Source)
+	at jdk.proxy3/jdk.proxy3.$Proxy149.prepareStatement(Unknown Source)
 	at org.apache.ibatis.executor.statement.PreparedStatementHandler.instantiateStatement(PreparedStatementHandler.java:88)
 	at org.apache.ibatis.executor.statement.BaseStatementHandler.prepare(BaseStatementHandler.java:90)
 	at org.apache.ibatis.executor.statement.RoutingStatementHandler.prepare(RoutingStatementHandler.java:60)
@@ -133,7 +133,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.apache.ibatis.plugin.Invocation.proceed(Invocation.java:61)
 	at com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor.intercept(MybatisPlusInterceptor.java:106)
 	at org.apache.ibatis.plugin.Plugin.invoke(Plugin.java:59)
-	at jdk.proxy2/jdk.proxy2.$Proxy143.prepare(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy148.prepare(Unknown Source)
 	at org.apache.ibatis.executor.SimpleExecutor.prepareStatement(SimpleExecutor.java:90)
 	at org.apache.ibatis.executor.SimpleExecutor.doQuery(SimpleExecutor.java:64)
 	at org.apache.ibatis.executor.BaseExecutor.queryFromDatabase(BaseExecutor.java:336)
@@ -141,7 +141,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.apache.ibatis.executor.CachingExecutor.query(CachingExecutor.java:110)
 	at com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor.intercept(MybatisPlusInterceptor.java:81)
 	at org.apache.ibatis.plugin.Plugin.invoke(Plugin.java:59)
-	at jdk.proxy2/jdk.proxy2.$Proxy141.query(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy146.query(Unknown Source)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:154)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:147)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:142)
@@ -152,7 +152,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.mybatis.spring.SqlSessionTemplate$SqlSessionInterceptor.invoke(SqlSessionTemplate.java:425)
 	... 68 more
 
-com.property.repair.controller.RepairOrderControllerIntegrationTest.unauthorizedAccess -- Time elapsed: 0.038 s <<< FAILURE!
+com.property.repair.controller.RepairOrderControllerIntegrationTest.unauthorizedAccess -- Time elapsed: 0.020 s <<< FAILURE!
 java.lang.AssertionError: Status expected:<401> but was:<403>
 	at org.springframework.test.util.AssertionErrors.fail(AssertionErrors.java:59)
 	at org.springframework.test.util.AssertionErrors.assertEquals(AssertionErrors.java:122)
@@ -163,7 +163,7 @@ java.lang.AssertionError: Status expected:<401> but was:<403>
 	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
 	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
 
-com.property.repair.controller.RepairOrderControllerIntegrationTest.workerCannotSubmit -- Time elapsed: 0.027 s <<< ERROR!
+com.property.repair.controller.RepairOrderControllerIntegrationTest.workerCannotSubmit -- Time elapsed: 0.016 s <<< ERROR!
 org.springframework.jdbc.BadSqlGrammarException: 
 
 ### Error querying database.  Cause: org.h2.jdbc.JdbcSQLSyntaxErrorException: Table "SYS_USER" not found (this database is empty); SQL statement:
@@ -180,23 +180,23 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:116)
 	at org.mybatis.spring.MyBatisExceptionTranslator.translateExceptionIfPossible(MyBatisExceptionTranslator.java:92)
 	at org.mybatis.spring.SqlSessionTemplate$SqlSessionInterceptor.invoke(SqlSessionTemplate.java:439)
-	at jdk.proxy2/jdk.proxy2.$Proxy98.selectList(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy96.selectList(Unknown Source)
 	at org.mybatis.spring.SqlSessionTemplate.selectList(SqlSessionTemplate.java:224)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperMethod.executeForMany(MybatisMapperMethod.java:164)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperMethod.execute(MybatisMapperMethod.java:77)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$PlainMethodInvoker.invoke(MybatisMapperProxy.java:149)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectList(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectList(Unknown Source)
 	at com.baomidou.mybatisplus.core.mapper.BaseMapper.selectOne(BaseMapper.java:223)
 	at java.base/java.lang.invoke.MethodHandle.invokeWithArguments(MethodHandle.java:732)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$DefaultMethodInvoker.invoke(MybatisMapperProxy.java:163)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectOne(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectOne(Unknown Source)
 	at com.baomidou.mybatisplus.core.mapper.BaseMapper.selectOne(BaseMapper.java:212)
 	at java.base/java.lang.invoke.MethodHandle.invokeWithArguments(MethodHandle.java:732)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy$DefaultMethodInvoker.invoke(MybatisMapperProxy.java:163)
 	at com.baomidou.mybatisplus.core.override.MybatisMapperProxy.invoke(MybatisMapperProxy.java:90)
-	at jdk.proxy2/jdk.proxy2.$Proxy102.selectOne(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy100.selectOne(Unknown Source)
 	at com.property.repair.security.UserDetailsServiceImpl.loadUserByUsername(UserDetailsServiceImpl.java:20)
 	at com.property.repair.security.JwtAuthenticationFilter.doFilterInternal(JwtAuthenticationFilter.java:38)
 	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
@@ -283,7 +283,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
 	at org.apache.ibatis.logging.jdbc.ConnectionLogger.invoke(ConnectionLogger.java:53)
-	at jdk.proxy3/jdk.proxy3.$Proxy148.prepareStatement(Unknown Source)
+	at jdk.proxy3/jdk.proxy3.$Proxy149.prepareStatement(Unknown Source)
 	at org.apache.ibatis.executor.statement.PreparedStatementHandler.instantiateStatement(PreparedStatementHandler.java:88)
 	at org.apache.ibatis.executor.statement.BaseStatementHandler.prepare(BaseStatementHandler.java:90)
 	at org.apache.ibatis.executor.statement.RoutingStatementHandler.prepare(RoutingStatementHandler.java:60)
@@ -294,7 +294,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.apache.ibatis.plugin.Invocation.proceed(Invocation.java:61)
 	at com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor.intercept(MybatisPlusInterceptor.java:106)
 	at org.apache.ibatis.plugin.Plugin.invoke(Plugin.java:59)
-	at jdk.proxy2/jdk.proxy2.$Proxy143.prepare(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy148.prepare(Unknown Source)
 	at org.apache.ibatis.executor.SimpleExecutor.prepareStatement(SimpleExecutor.java:90)
 	at org.apache.ibatis.executor.SimpleExecutor.doQuery(SimpleExecutor.java:64)
 	at org.apache.ibatis.executor.BaseExecutor.queryFromDatabase(BaseExecutor.java:336)
@@ -302,7 +302,7 @@ SELECT  id,username,password,real_name,phone,role,community_id,building_id,statu
 	at org.apache.ibatis.executor.CachingExecutor.query(CachingExecutor.java:110)
 	at com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor.intercept(MybatisPlusInterceptor.java:81)
 	at org.apache.ibatis.plugin.Plugin.invoke(Plugin.java:59)
-	at jdk.proxy2/jdk.proxy2.$Proxy141.query(Unknown Source)
+	at jdk.proxy2/jdk.proxy2.$Proxy146.query(Unknown Source)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:154)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:147)
 	at org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:142)

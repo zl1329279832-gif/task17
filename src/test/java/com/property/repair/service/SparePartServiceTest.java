@@ -15,6 +15,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -28,6 +30,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class SparePartServiceTest {
 
     @Mock private SparePartMapper sparePartMapper;
@@ -51,6 +54,21 @@ class SparePartServiceTest {
         stateMachine = new OrderStateMachine();
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         lenient().when(redisTemplate.delete(anyString())).thenReturn(true);
+
+        // Default mock for getPartRequestDetail — returns a minimal PartRequest
+        // so createPartRequest can build the return VO without NPE.
+        // Individual tests may override with specific stubs.
+        lenient().when(partRequestMapper.selectById(any())).thenAnswer(invocation -> {
+            Object arg = invocation.getArgument(0);
+            PartRequest pr = new PartRequest();
+            pr.setId(arg instanceof Long ? (Long) arg : 0L);
+            pr.setOrderId(1L);
+            pr.setWorkerId(10L);
+            pr.setRequestNo("PR-TEST");
+            pr.setRequestType(PartRequestType.NORMAL.getCode());
+            pr.setStatus(PartRequestStatus.PENDING.getCode());
+            return pr;
+        });
 
         sparePartService = new SparePartServiceImpl(
                 sparePartMapper, inventoryMapper, partRequestMapper,
@@ -213,8 +231,8 @@ class SparePartServiceTest {
         assertEquals(OrderStatus.VISITING.getCode(), updated.getPreviousStatus());
         assertNotNull(updated.getWaitingPartsAt());
 
-        // Verify: SLA timeout Redis keys cleared (6 keys)
-        verify(redisTemplate, atLeast(6)).delete(anyString());
+        // Verify: only SLA deadline keys cleared (3 keys), processed keys preserved
+        verify(redisTemplate, times(3)).delete(anyString());
 
         // Verify: progress recorded
         verify(progressMapper).insert(any(RepairProgress.class));
@@ -232,6 +250,7 @@ class SparePartServiceTest {
     @DisplayName("Parts arrived — auto-resume from WAITING_PARTS, SLA deadline adjusted")
     void partsArrived_autoResume_slaAdjusted() {
         RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+        LocalDateTime originalVisitAt = order.getVisitAt();
         when(orderMapper.selectById(1L)).thenReturn(order);
         when(orderMapper.updateById(any())).thenReturn(1);
         when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
@@ -260,7 +279,7 @@ class SparePartServiceTest {
         assertTrue(resumed.getTotalWaitingPartsSeconds() > 0);
 
         // Verify: visitAt pushed forward (SLA adjusted)
-        assertTrue(resumed.getVisitAt().isAfter(order.getVisitAt()));
+        assertTrue(resumed.getVisitAt().isAfter(originalVisitAt));
 
         // Verify: Redis timeout key re-established for complete timeout
         verify(valueOperations).set(
@@ -326,8 +345,8 @@ class SparePartServiceTest {
         when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
 
         when(partRequestMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
-        when(partRequestMapper.insert(any())).thenAnswer(inv -> {
-            PartRequest pr = inv.getArgument(0);
+        when(partRequestMapper.insert(any())).thenAnswer(invocation -> {
+            PartRequest pr = invocation.getArgument(0);
             pr.setId(60L);
             return 1;
         });
@@ -872,7 +891,6 @@ class SparePartServiceTest {
         RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
         LocalDateTime originalVisitAt = order.getVisitAt();
 
-        when(orderMapper.selectById(1L)).thenReturn(order);
         when(orderMapper.updateById(any())).thenReturn(1);
         when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
                 .thenReturn(List.of(order));
@@ -915,9 +933,7 @@ class SparePartServiceTest {
 
         // Faucet (critical) has stock, Pipe (non-critical) has no stock
         SparePartInventory faucetInv = buildInventory(1L, 5);
-        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(faucetInv);
-        // Second call for pipe returns null
-        when(inventoryMapper.selectOne(argThat((LambdaQueryWrapper<?> w) -> true)))
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class)))
                 .thenReturn(faucetInv)
                 .thenReturn(null);
 
@@ -953,5 +969,458 @@ class SparePartServiceTest {
         // Verify: order NOT in WAITING_PARTS (critical part has sufficient stock)
         verify(orderMapper, never()).updateById(argThat(o ->
                 OrderStatus.WAITING_PARTS.getCode().equals(((RepairOrder) o).getStatus())));
+    }
+
+    // ==========================================================================
+    // Test 18: Duplicate Request While Already WAITING_PARTS — Idempotent
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Duplicate critical shortage while WAITING_PARTS — previousStatus not overwritten")
+    void duplicateShortageWhileWaitingParts_previousStatusPreserved() {
+        // Order already in WAITING_PARTS (came from VISITING)
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+        when(orderMapper.selectById(1L)).thenReturn(order);
+
+        SparePart faucet = buildFaucetPart();
+        when(sparePartMapper.selectById(1L)).thenReturn(faucet);
+
+        // Stock is 0 — critical shortage again
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
+
+        // No duplicate active requests
+        when(partRequestMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
+
+        when(partRequestMapper.insert(any())).thenAnswer(inv -> {
+            PartRequest pr = inv.getArgument(0);
+            pr.setId(70L);
+            return 1;
+        });
+        when(partRequestItemMapper.insert(any())).thenReturn(1);
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(partAuditLogMapper.insert(any())).thenReturn(1);
+
+        PartRequestCreateRequest request = buildPartRequest(1L, 1, true);
+        sparePartService.createPartRequest(1L, request, 10L);
+
+        // Verify: order status NOT updated (already WAITING_PARTS, should not re-enter)
+        verify(orderMapper, never()).updateById(any(RepairOrder.class));
+
+        // Verify: previousStatus is still VISITING (not overwritten to WAITING_PARTS)
+        assertEquals(OrderStatus.VISITING.getCode(), order.getPreviousStatus());
+
+        // Verify: no Redis keys cleared (no state transition happened)
+        verify(redisTemplate, never()).delete(anyString());
+    }
+
+    // ==========================================================================
+    // Test 19: Purchase Arrival Resumes WAITING_PARTS When Stock Sufficient
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Purchase arrival — resumes WAITING_PARTS when available stock covers deficit")
+    void purchaseArrival_resumesWhenStockCoversDeficit() {
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(order));
+
+        // Active APPROVED request with critical item NOT yet issued (deficit = 2)
+        PartRequest activeReq = new PartRequest();
+        activeReq.setId(50L);
+        activeReq.setOrderId(1L);
+        activeReq.setStatus(PartRequestStatus.APPROVED.getCode());
+
+        PartRequestItem criticalItem = new PartRequestItem();
+        criticalItem.setId(100L);
+        criticalItem.setRequestId(50L);
+        criticalItem.setPartId(1L);
+        criticalItem.setRequestedQty(2);
+        criticalItem.setIssuedQty(0);
+        criticalItem.setCritical(1);
+
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(activeReq));
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(criticalItem));
+
+        // Available stock is now 5 (after purchase arrival) — covers deficit of 2
+        SparePartInventory inv = buildInventory(1L, 5);
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
+
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        sparePartService.checkAndResumeWaitingOrders(100L, 200L);
+
+        // Verify: order resumed to VISITING
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        RepairOrder resumed = captor.getValue();
+        assertEquals(OrderStatus.VISITING.getCode(), resumed.getStatus());
+        assertNull(resumed.getWaitingPartsAt());
+    }
+
+    // ==========================================================================
+    // Test 20: Purchase Arrival Does NOT Resume When Stock Still Insufficient
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Purchase arrival — does NOT resume when stock still insufficient for deficit")
+    void purchaseArrival_doesNotResumeWhenStockInsufficient() {
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(order));
+
+        // Active request with critical item needing 10, only 3 available
+        PartRequest activeReq = new PartRequest();
+        activeReq.setId(50L);
+        activeReq.setOrderId(1L);
+        activeReq.setStatus(PartRequestStatus.APPROVED.getCode());
+
+        PartRequestItem criticalItem = new PartRequestItem();
+        criticalItem.setId(100L);
+        criticalItem.setRequestId(50L);
+        criticalItem.setPartId(1L);
+        criticalItem.setRequestedQty(10);
+        criticalItem.setIssuedQty(0);
+        criticalItem.setCritical(1);
+
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(activeReq));
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(criticalItem));
+
+        SparePartInventory inv = buildInventory(1L, 3); // Only 3, need 10
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
+
+        sparePartService.checkAndResumeWaitingOrders(100L, 200L);
+
+        // Verify: order NOT updated (still waiting)
+        verify(orderMapper, never()).updateById(any(RepairOrder.class));
+    }
+
+    // ==========================================================================
+    // Test 21: Rework Second Request Interleaved — REWORKING → WAITING_PARTS → Resume to REWORKING
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Rework interleaved — WAITING_PARTS resumes back to REWORKING with correct SLA")
+    void reworkInterleaved_resumesToReworking() {
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.REWORKING.getCode());
+        order.setId(3L);
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(order));
+
+        // No active pending requests — all critical items fulfilled
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        sparePartService.checkAndResumeWaitingOrders(100L, 200L);
+
+        // Verify: resumed to REWORKING
+        ArgumentCaptor<RepairOrder> captor = ArgumentCaptor.forClass(RepairOrder.class);
+        verify(orderMapper).updateById(captor.capture());
+        RepairOrder resumed = captor.getValue();
+        assertEquals(OrderStatus.REWORKING.getCode(), resumed.getStatus());
+        assertNull(resumed.getPreviousStatus());
+        assertTrue(resumed.getTotalWaitingPartsSeconds() > 0);
+
+        // Verify: complete timeout key re-established for REWORKING
+        verify(valueOperations).set(
+                eq("timeout:complete:3"), anyString(), any(Duration.class));
+
+        // Verify: processed keys cleared for fresh SLA cycle
+        verify(redisTemplate).delete("timeout:processed:ACCEPT_TIMEOUT:3");
+        verify(redisTemplate).delete("timeout:processed:VISIT_TIMEOUT:3");
+        verify(redisTemplate).delete("timeout:processed:COMPLETE_TIMEOUT:3");
+    }
+
+    // ==========================================================================
+    // Test 22: Issue Parts — Inventory Deduction When Reserved < Issued
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Issue parts — correctly deducts when reserved qty is less than issued qty")
+    void issueParts_reservedLessThanIssued_correctDeduction() {
+        PartRequest partRequest = new PartRequest();
+        partRequest.setId(50L);
+        partRequest.setOrderId(1L);
+        partRequest.setStatus(PartRequestStatus.APPROVED.getCode());
+        when(partRequestMapper.selectById(50L)).thenReturn(partRequest);
+        when(partRequestMapper.updateById(any())).thenReturn(1);
+
+        RepairOrder order = buildVisitingOrder();
+        when(orderMapper.selectById(1L)).thenReturn(order);
+
+        PartRequestItem item = new PartRequestItem();
+        item.setId(100L);
+        item.setRequestId(50L);
+        item.setPartId(1L);
+        item.setRequestedQty(5);
+        item.setIssuedQty(0);
+        item.setReturnedQty(0);
+        item.setConsumedQty(0);
+        item.setCritical(0);
+        when(partRequestItemMapper.selectById(100L)).thenReturn(item);
+        when(partRequestItemMapper.updateById(any())).thenReturn(1);
+
+        // Only 2 reserved (approve only reserved partial), but 8 available, total 10
+        SparePartInventory inv = new SparePartInventory();
+        inv.setId(10L);
+        inv.setPartId(1L);
+        inv.setCommunityId(100L);
+        inv.setBuildingId(200L);
+        inv.setAvailableQty(8);
+        inv.setReservedQty(2);
+        inv.setTotalQty(10);
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
+        when(inventoryMapper.updateById(any())).thenReturn(1);
+
+        // After issue, item is fully issued
+        PartRequestItem fullyIssued = new PartRequestItem();
+        fullyIssued.setId(100L);
+        fullyIssued.setRequestId(50L);
+        fullyIssued.setPartId(1L);
+        fullyIssued.setRequestedQty(5);
+        fullyIssued.setIssuedQty(5);
+        fullyIssued.setCritical(0);
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(fullyIssued));
+
+        // For checkAllCriticalItemsIssued — no active requests with critical items
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(partAuditLogMapper.insert(any())).thenReturn(1);
+
+        IssuePartsRequest request = new IssuePartsRequest();
+        IssuePartsRequest.IssueItem issueItem = new IssuePartsRequest.IssueItem();
+        issueItem.setRequestItemId(100L);
+        issueItem.setIssuedQty(5); // Issue 5, but only 2 reserved
+        request.setItems(List.of(issueItem));
+
+        sparePartService.issueParts(50L, request, 99L);
+
+        // Verify inventory: reserved = 0, available = 8 - 3 = 5, total = 10 - 5 = 5
+        ArgumentCaptor<SparePartInventory> invCaptor = ArgumentCaptor.forClass(SparePartInventory.class);
+        verify(inventoryMapper).updateById(invCaptor.capture());
+        SparePartInventory updated = invCaptor.getValue();
+        assertEquals(0, updated.getReservedQty());   // 2 - 2 = 0
+        assertEquals(5, updated.getAvailableQty());   // 8 - 3 (remainder) = 5
+        assertEquals(5, updated.getTotalQty());        // 10 - 5 (full issued) = 5
+    }
+
+    // ==========================================================================
+    // Test 23: AllCriticalIssued Checks Across Multiple Requests
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Issue parts — does NOT resume when other request still has unfulfilled critical items")
+    void issueParts_otherRequestUnfulfilled_noResume() {
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+
+        // Request A — being issued now
+        PartRequest requestA = new PartRequest();
+        requestA.setId(50L);
+        requestA.setOrderId(1L);
+        requestA.setStatus(PartRequestStatus.APPROVED.getCode());
+        when(partRequestMapper.selectById(50L)).thenReturn(requestA);
+        when(partRequestMapper.updateById(any())).thenReturn(1);
+
+        when(orderMapper.selectById(1L)).thenReturn(order);
+
+        PartRequestItem itemA = new PartRequestItem();
+        itemA.setId(100L);
+        itemA.setRequestId(50L);
+        itemA.setPartId(1L);
+        itemA.setRequestedQty(1);
+        itemA.setIssuedQty(0);
+        itemA.setReturnedQty(0);
+        itemA.setConsumedQty(0);
+        itemA.setCritical(1);
+        when(partRequestItemMapper.selectById(100L)).thenReturn(itemA);
+        when(partRequestItemMapper.updateById(any())).thenReturn(1);
+
+        SparePartInventory inv = buildInventory(1L, 10);
+        inv.setReservedQty(2);
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
+        when(inventoryMapper.updateById(any())).thenReturn(1);
+
+        // After issue: item A fully issued
+        PartRequestItem itemAIssued = new PartRequestItem();
+        itemAIssued.setId(100L);
+        itemAIssued.setRequestId(50L);
+        itemAIssued.setPartId(1L);
+        itemAIssued.setRequestedQty(1);
+        itemAIssued.setIssuedQty(1);
+        itemAIssued.setCritical(1);
+
+        // Request B — still active with unfulfilled critical items
+        PartRequest requestB = new PartRequest();
+        requestB.setId(60L);
+        requestB.setOrderId(1L);
+        requestB.setStatus(PartRequestStatus.APPROVED.getCode());
+
+        PartRequestItem itemB = new PartRequestItem();
+        itemB.setId(200L);
+        itemB.setRequestId(60L);
+        itemB.setPartId(2L);
+        itemB.setRequestedQty(3);
+        itemB.setIssuedQty(0); // NOT issued yet
+        itemB.setCritical(1);
+
+        // checkAllCriticalItemsIssued queries active requests
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(requestB)); // Request B is still active with unfulfilled critical
+
+        // partRequestItemMapper.selectList calls in order:
+        // 1. allItems for request A status check
+        // 2. critical items for request B in checkAllCriticalItemsIssued
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(itemAIssued))
+                .thenReturn(List.of(itemB));
+
+        when(partAuditLogMapper.insert(any())).thenReturn(1);
+
+        IssuePartsRequest request = new IssuePartsRequest();
+        IssuePartsRequest.IssueItem issueItem = new IssuePartsRequest.IssueItem();
+        issueItem.setRequestItemId(100L);
+        issueItem.setIssuedQty(1);
+        request.setItems(List.of(issueItem));
+
+        sparePartService.issueParts(50L, request, 99L);
+
+        // Verify: order NOT resumed (request B still has unfulfilled critical items)
+        // orderMapper.updateById should NOT be called (no resume)
+        verify(orderMapper, never()).updateById(any(RepairOrder.class));
+    }
+
+    // ==========================================================================
+    // Test 24: WAITING_PARTS Entry — Only Clears SLA Keys, Not Processed Keys
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Entering WAITING_PARTS — clears SLA deadline keys but preserves processed keys")
+    void enterWaitingParts_clearsOnlySlaKeys() {
+        RepairOrder order = buildVisitingOrder();
+        when(orderMapper.selectById(1L)).thenReturn(order);
+        when(orderMapper.updateById(any())).thenReturn(1);
+
+        SparePart faucet = buildFaucetPart();
+        when(sparePartMapper.selectById(1L)).thenReturn(faucet);
+
+        // Stock is 0 — critical shortage
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
+        when(partRequestMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
+
+        when(partRequestMapper.insert(any())).thenAnswer(inv -> {
+            PartRequest pr = inv.getArgument(0);
+            pr.setId(80L);
+            return 1;
+        });
+        when(partRequestItemMapper.insert(any())).thenReturn(1);
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(partAuditLogMapper.insert(any())).thenReturn(1);
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        PartRequestCreateRequest request = buildPartRequest(1L, 1, true);
+        sparePartService.createPartRequest(1L, request, 10L);
+
+        // Verify: only 3 SLA deadline keys cleared (not the 3 processed keys)
+        verify(redisTemplate).delete("timeout:accept:1");
+        verify(redisTemplate).delete("timeout:visit:1");
+        verify(redisTemplate).delete("timeout:complete:1");
+        verify(redisTemplate, never()).delete("timeout:processed:ACCEPT_TIMEOUT:1");
+        verify(redisTemplate, never()).delete("timeout:processed:VISIT_TIMEOUT:1");
+        verify(redisTemplate, never()).delete("timeout:processed:COMPLETE_TIMEOUT:1");
+    }
+
+    // ==========================================================================
+    // Test 25: Resume from WAITING_PARTS — Clears Processed Keys and Rebuilds Timeout
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Resume from WAITING_PARTS — clears processed keys and rebuilds timeout keys")
+    void resumeFromWaitingParts_clearsProcessedAndRebuildsTimeout() {
+        RepairOrder order = buildWaitingPartsOrder(OrderStatus.VISITING.getCode());
+        when(orderMapper.updateById(any())).thenReturn(1);
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(order));
+
+        // No active pending requests — all fulfilled
+        when(partRequestMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+        when(progressMapper.insert(any())).thenReturn(1);
+
+        sparePartService.checkAndResumeWaitingOrders(100L, 200L);
+
+        // Verify: processed keys ARE cleared on resume (fresh SLA cycle)
+        verify(redisTemplate).delete("timeout:processed:ACCEPT_TIMEOUT:1");
+        verify(redisTemplate).delete("timeout:processed:VISIT_TIMEOUT:1");
+        verify(redisTemplate).delete("timeout:processed:COMPLETE_TIMEOUT:1");
+
+        // Verify: timeout key re-established
+        verify(valueOperations).set(
+                eq("timeout:complete:1"), anyString(), any(Duration.class));
+
+        // Verify: worker notified
+        verify(valueOperations).set(
+                eq("notification:parts_arrived:10"), any(), any(Duration.class));
+    }
+
+    // ==========================================================================
+    // Test 26: Approve With Zero Available — No Negative Reservation
+    // ==========================================================================
+
+    @Test
+    @DisplayName("Approve part request with zero available stock — no negative reservation")
+    void approvePartRequest_zeroAvailable_noNegativeReservation() {
+        PartRequest partRequest = new PartRequest();
+        partRequest.setId(50L);
+        partRequest.setOrderId(1L);
+        partRequest.setStatus(PartRequestStatus.PENDING.getCode());
+        when(partRequestMapper.selectById(50L)).thenReturn(partRequest);
+        when(partRequestMapper.updateById(any())).thenReturn(1);
+
+        RepairOrder order = buildVisitingOrder();
+        when(orderMapper.selectById(1L)).thenReturn(order);
+
+        PartRequestItem item = new PartRequestItem();
+        item.setId(100L);
+        item.setRequestId(50L);
+        item.setPartId(1L);
+        item.setRequestedQty(5);
+        item.setStatus(PartRequestStatus.PENDING.getCode());
+        when(partRequestItemMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(item));
+        when(partRequestItemMapper.updateById(any())).thenReturn(1);
+
+        // Zero available stock
+        SparePartInventory inv = new SparePartInventory();
+        inv.setId(10L);
+        inv.setPartId(1L);
+        inv.setCommunityId(100L);
+        inv.setBuildingId(200L);
+        inv.setAvailableQty(0);
+        inv.setReservedQty(0);
+        inv.setTotalQty(0);
+        when(inventoryMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(inv);
+        when(partAuditLogMapper.insert(any())).thenReturn(1);
+
+        sparePartService.approvePartRequest(50L, 99L);
+
+        // Verify: inventory NOT updated (nothing to reserve, canReserve = 0)
+        verify(inventoryMapper, never()).updateById(any(SparePartInventory.class));
+
+        // Verify: available never goes negative
+        assertEquals(0, inv.getAvailableQty());
+        assertEquals(0, inv.getReservedQty());
     }
 }

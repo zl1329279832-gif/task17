@@ -150,7 +150,8 @@ public class TimeoutEscalationTask {
 
             // Skip terminal orders
             if (order.getStatus().equals(OrderStatus.REVIEWED.getCode())
-                    || order.getStatus().equals(OrderStatus.CLOSED.getCode())) {
+                    || order.getStatus().equals(OrderStatus.CLOSED.getCode())
+                    || order.getStatus().equals(OrderStatus.CANCELLED.getCode())) {
                 continue;
             }
 

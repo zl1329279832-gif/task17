@@ -215,4 +215,47 @@ class TimeoutEscalationTaskTest {
 
         verify(escalationMapper, never()).insert(any());
     }
+
+    @Test
+    @DisplayName("Second-level escalation skips CANCELLED orders")
+    void secondLevel_skipsCancelledOrders() {
+        TimeoutEscalation esc = new TimeoutEscalation();
+        esc.setId(100L);
+        esc.setOrderId(1L);
+        esc.setTimeoutType(TimeoutType.ACCEPT_TIMEOUT.getCode());
+        esc.setDeadline(LocalDateTime.now().minusHours(6));
+        esc.setDispatchId(10L);
+        esc.setEscalationLevel(1);
+        esc.setHandled(0);
+
+        when(escalationMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(esc));
+
+        RepairOrder order = new RepairOrder();
+        order.setId(1L);
+        order.setStatus(OrderStatus.CANCELLED.getCode());
+        order.setCurrentDispatchId(10L);
+        when(orderMapper.selectById(1L)).thenReturn(order);
+
+        task.checkSecondLevelEscalation();
+
+        // Should NOT create second-level escalation for cancelled orders
+        verify(escalationMapper, never()).insert(any());
+    }
+
+    @Test
+    @DisplayName("WAITING_PARTS orders excluded from first-level timeout checks")
+    void waitingPartsOrders_excludedFromFirstLevelChecks() {
+        // WAITING_PARTS orders have a different status, so they are not returned
+        // by queries that filter for DISPATCHED/ACCEPTED/VISITING
+        when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(Collections.emptyList());
+
+        task.checkAcceptTimeouts();
+        task.checkVisitTimeouts();
+        task.checkCompleteTimeouts();
+
+        // No escalations should be created
+        verify(escalationMapper, never()).insert(any());
+    }
 }

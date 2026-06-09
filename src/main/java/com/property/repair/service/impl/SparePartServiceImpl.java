@@ -180,7 +180,8 @@ public class SparePartServiceImpl implements SparePartService {
         }
 
         // If critical parts are insufficient → enter WAITING_PARTS and pause SLA
-        if (hasCriticalShortage) {
+        // Skip if already in WAITING_PARTS (idempotent — do not overwrite previousStatus)
+        if (hasCriticalShortage && !OrderStatus.WAITING_PARTS.getCode().equals(order.getStatus())) {
             enterWaitingPartsStatus(order, workerId);
         }
 
@@ -241,9 +242,14 @@ public class SparePartServiceImpl implements SparePartService {
             if (inventory != null) {
                 // Reserve stock (move from available to reserved)
                 int canReserve = Math.min(item.getRequestedQty(), inventory.getAvailableQty());
-                inventory.setAvailableQty(inventory.getAvailableQty() - canReserve);
-                inventory.setReservedQty(inventory.getReservedQty() + canReserve);
-                inventoryMapper.updateById(inventory);
+                if (canReserve < 0) {
+                    canReserve = 0;
+                }
+                if (canReserve > 0) {
+                    inventory.setAvailableQty(inventory.getAvailableQty() - canReserve);
+                    inventory.setReservedQty(inventory.getReservedQty() + canReserve);
+                    inventoryMapper.updateById(inventory);
+                }
             }
             item.setStatus(PartRequestStatus.APPROVED.getCode());
             partRequestItemMapper.updateById(item);
@@ -274,7 +280,6 @@ public class SparePartServiceImpl implements SparePartService {
         }
 
         RepairOrder order = orderMapper.selectById(partRequest.getOrderId());
-        boolean allCriticalIssued = true;
 
         for (IssuePartsRequest.IssueItem issueItem : request.getItems()) {
             PartRequestItem item = partRequestItemMapper.selectById(issueItem.getRequestItemId());
@@ -287,13 +292,19 @@ public class SparePartServiceImpl implements SparePartService {
                 throw new BusinessException("Invalid issue quantity for item: " + item.getId());
             }
 
-            // Deduct from inventory (reserved → issued)
+            // Deduct from inventory (reserved → issued, then total decreases)
             SparePartInventory inventory = findInventory(item.getPartId(),
                     order.getCommunityId(), order.getBuildingId());
             if (inventory != null) {
                 int deductFromReserved = Math.min(issuedQty, inventory.getReservedQty());
                 inventory.setReservedQty(inventory.getReservedQty() - deductFromReserved);
-                inventory.setTotalQty(inventory.getTotalQty() - deductFromReserved);
+                // If issued more than reserved (e.g. partial reservation), deduct remainder from available
+                int remainder = issuedQty - deductFromReserved;
+                if (remainder > 0) {
+                    inventory.setAvailableQty(inventory.getAvailableQty() - remainder);
+                }
+                // Total always decreases by the full issued quantity
+                inventory.setTotalQty(inventory.getTotalQty() - issuedQty);
                 inventoryMapper.updateById(inventory);
             }
 
@@ -304,14 +315,9 @@ public class SparePartServiceImpl implements SparePartService {
                 item.setStatus("PARTIALLY_ISSUED");
             }
             partRequestItemMapper.updateById(item);
-
-            // Check if critical item is fully issued
-            if (item.getCritical() == 1 && item.getIssuedQty() < item.getRequestedQty()) {
-                allCriticalIssued = false;
-            }
         }
 
-        // Update request status
+        // Update request status — re-query all items to get accurate state after updates
         List<PartRequestItem> allItems = partRequestItemMapper.selectList(
                 new LambdaQueryWrapper<PartRequestItem>()
                         .eq(PartRequestItem::getRequestId, requestId));
@@ -325,6 +331,9 @@ public class SparePartServiceImpl implements SparePartService {
             partRequest.setStatus(PartRequestStatus.PARTIALLY_ISSUED.getCode());
         }
         partRequestMapper.updateById(partRequest);
+
+        // Check if ALL critical items across ALL active requests for this order are fulfilled
+        boolean allCriticalIssued = checkAllCriticalItemsIssued(partRequest.getOrderId());
 
         // If order is in WAITING_PARTS and all critical parts are now issued, auto-resume
         if (order != null && OrderStatus.WAITING_PARTS.getCode().equals(order.getStatus())
@@ -616,8 +625,8 @@ public class SparePartServiceImpl implements SparePartService {
         order.setWaitingPartsAt(LocalDateTime.now());
         orderMapper.updateById(order);
 
-        // Clear all SLA timeout Redis keys (same as suspend)
-        clearAllTimeoutKeys(order.getId());
+        // Clear SLA deadline keys only (preserve processed keys for duplicate prevention)
+        clearSlaTimeoutKeys(order.getId());
 
         // Record progress
         recordProgress(order.getId(), fromStatus, OrderStatus.WAITING_PARTS.getCode(),
@@ -662,6 +671,9 @@ public class SparePartServiceImpl implements SparePartService {
         order.setWaitingPartsAt(null);
         orderMapper.updateById(order);
 
+        // Clear processed keys so fresh escalation can fire for the adjusted SLA period
+        clearProcessedKeys(order.getId());
+
         // Re-establish Redis timeout keys with adjusted deadlines
         reestablishTimeoutKeys(order, resumeTo);
 
@@ -690,12 +702,47 @@ public class SparePartServiceImpl implements SparePartService {
                                 PartRequestStatus.PARTIALLY_ISSUED.getCode()));
 
         if (requests.isEmpty()) {
-            // No active requests — check if there are any critical items that were never fulfilled
             return true;
         }
 
         // Check if all critical items across all active requests have been issued
+        // OR have sufficient available stock to be fulfilled
         for (PartRequest request : requests) {
+            List<PartRequestItem> criticalItems = partRequestItemMapper.selectList(
+                    new LambdaQueryWrapper<PartRequestItem>()
+                            .eq(PartRequestItem::getRequestId, request.getId())
+                            .eq(PartRequestItem::getCritical, 1));
+
+            for (PartRequestItem item : criticalItems) {
+                int deficit = item.getRequestedQty() - item.getIssuedQty();
+                if (deficit <= 0) {
+                    continue; // Already fully issued
+                }
+                // Check if available stock can cover the deficit
+                int available = getAvailableStock(item.getPartId(),
+                        order.getCommunityId(), order.getBuildingId());
+                if (available < deficit) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Check if ALL critical items across ALL active requests for an order have been issued.
+     * Used after issuing parts to determine if auto-resume from WAITING_PARTS is possible.
+     */
+    private boolean checkAllCriticalItemsIssued(Long orderId) {
+        List<PartRequest> activeRequests = partRequestMapper.selectList(
+                new LambdaQueryWrapper<PartRequest>()
+                        .eq(PartRequest::getOrderId, orderId)
+                        .in(PartRequest::getStatus,
+                                PartRequestStatus.PENDING.getCode(),
+                                PartRequestStatus.APPROVED.getCode(),
+                                PartRequestStatus.PARTIALLY_ISSUED.getCode()));
+
+        for (PartRequest request : activeRequests) {
             List<PartRequestItem> criticalItems = partRequestItemMapper.selectList(
                     new LambdaQueryWrapper<PartRequestItem>()
                             .eq(PartRequestItem::getRequestId, request.getId())
@@ -761,6 +808,27 @@ public class SparePartServiceImpl implements SparePartService {
         redisTemplate.delete("timeout:processed:COMPLETE_TIMEOUT:" + orderId);
     }
 
+    /**
+     * Clear only SLA deadline keys (not processed keys).
+     * Used when entering WAITING_PARTS — preserves processed keys so that
+     * the same dispatch round's escalation history is retained until resume.
+     */
+    private void clearSlaTimeoutKeys(Long orderId) {
+        redisTemplate.delete("timeout:accept:" + orderId);
+        redisTemplate.delete("timeout:visit:" + orderId);
+        redisTemplate.delete("timeout:complete:" + orderId);
+    }
+
+    /**
+     * Clear processed keys to allow fresh escalation after SLA adjustment.
+     * Called on resume from WAITING_PARTS when deadlines have been shifted.
+     */
+    private void clearProcessedKeys(Long orderId) {
+        redisTemplate.delete("timeout:processed:ACCEPT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:VISIT_TIMEOUT:" + orderId);
+        redisTemplate.delete("timeout:processed:COMPLETE_TIMEOUT:" + orderId);
+    }
+
     private void reestablishTimeoutKeys(RepairOrder order, String resumeTo) {
         if (OrderStatus.ACCEPTED.getCode().equals(resumeTo) && order.getAcceptedAt() != null) {
             LocalDateTime visitDeadline = order.getAcceptedAt().plusHours(4);
@@ -769,6 +837,13 @@ public class SparePartServiceImpl implements SparePartService {
                     visitDeadline.toString(),
                     Duration.ofHours(5));
         } else if (OrderStatus.VISITING.getCode().equals(resumeTo) && order.getVisitAt() != null) {
+            LocalDateTime completeDeadline = order.getVisitAt().plusHours(48);
+            redisTemplate.opsForValue().set(
+                    "timeout:complete:" + order.getId(),
+                    completeDeadline.toString(),
+                    Duration.ofHours(49));
+        } else if (OrderStatus.REWORKING.getCode().equals(resumeTo) && order.getVisitAt() != null) {
+            // Reworking shares the completion SLA — re-establish complete timeout
             LocalDateTime completeDeadline = order.getVisitAt().plusHours(48);
             redisTemplate.opsForValue().set(
                     "timeout:complete:" + order.getId(),

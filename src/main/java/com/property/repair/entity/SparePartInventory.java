@@ -35,6 +35,10 @@ public class SparePartInventory {
     /** Physical location description (e.g. "B1-A03") */
     private String locationCode;
 
+    /** Optimistic lock version — prevents concurrent inventory overwrites */
+    @Version
+    private Integer version;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 
